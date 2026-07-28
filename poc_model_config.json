@@ -1,0 +1,24 @@
+{
+    "net": {
+        "name": "LSTM",
+        "config": {
+            "num_layers": 2,
+            "hidden_size": 16,
+            "train_burn_in": 4096,
+            "train_truncate": null,
+            "conditioning_dim": 1
+        }
+    },
+    "optimizer": {
+        "lr": 0.01
+    },
+    "loss": {
+        "mel_weight": 6.2e-05
+    },
+    "lr_scheduler": {
+        "class": "ExponentialLR",
+        "kwargs": {
+            "gamma": 0.995
+        }
+    }
+}

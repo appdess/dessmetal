@@ -1,0 +1,195 @@
+name: macOS validation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate (${{ matrix.host_arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            host_arch: arm64
+          - runner: macos-15-intel
+            host_arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    env:
+      PRODUCT_ROOT: ${{ github.workspace }}/NeuralAmpModeler/build-mac/release/products
+      EXPECTED_HOST_ARCH: ${{ matrix.host_arch }}
+
+    steps:
+      # v4.2.2, resolved from the official actions/checkout repository.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Toolchain and immutable source identity
+        id: source
+        run: |
+          set -Eeuo pipefail
+          xcodebuild -version
+          cmake --version
+          test "$(uname -m)" = "$EXPECTED_HOST_ARCH"
+          git rev-parse HEAD
+          version="$(awk -F '"' '/^#define PLUG_VERSION_STR / { print $2; exit }' NeuralAmpModeler/config.h)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          source_hash="$(git archive --format=tar HEAD | shasum -a 256 | awk '{print $1}')"
+          printf 'DESSMETAL_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf '%s  git-archive-%s.tar\n' "$source_hash" "$(git rev-parse HEAD)" \
+            > "$RUNNER_TEMP/DessMetal-SOURCE-ARCHIVE-SHA256.txt"
+          {
+            echo '### Immutable source identity'
+            echo
+            echo "- Commit: \`$(git rev-parse HEAD)\`"
+            echo "- Version: \`$version\`"
+            echo "- \`git archive\` SHA-256: \`$source_hash\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Versioned state-layout migration tests
+        run: bash NeuralAmpModeler/tests/run_unserialization_layout_tests.sh
+
+      - name: Core and parametric model tests
+        working-directory: NeuralAmpModelerCore
+        run: |
+          set -Eeuo pipefail
+          cmake -S . -B build-ci -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build-ci --target run_tests -j 4
+          ./build-ci/tools/run_tests
+
+      - name: Hardened WAV parser tests
+        env:
+          DESSMETAL_WAV_SANITIZERS: address,undefined
+        run: bash AudioDSPTools/tests/run_wav_tests.sh
+
+      - name: Check release scripts and derived metadata
+        run: |
+          set -Eeuo pipefail
+          bash -n \
+            package_mac.sh \
+            notarize_mac.sh \
+            AudioDSPTools/tests/run_wav_tests.sh \
+            AudioDSPTools/tests/run_au_offline_test.sh \
+            NeuralAmpModeler/tests/run_unserialization_layout_tests.sh \
+            NeuralAmpModeler/tests/run_au_state_migration_test.sh
+          plutil -lint NeuralAmpModeler/resources/*.plist NeuralAmpModeler/resources/DessMetal-macOS-release.entitlements
+          version="$DESSMETAL_VERSION"
+          test "$(plutil -extract CFBundleShortVersionString raw NeuralAmpModeler/resources/DessMetal-macOS-Info.plist)" = "$version"
+          test "$(plutil -extract CFBundleShortVersionString raw NeuralAmpModeler/resources/DessMetal-AU-Info.plist)" = "$version"
+          test "$(plutil -extract CFBundleShortVersionString raw NeuralAmpModeler/resources/DessMetal-VST3-Info.plist)" = "$version"
+          marketing_versions="$(awk '/MARKETING_VERSION = / { value=$3; sub(/;$/, "", value); print value }' \
+            NeuralAmpModeler/projects/DessMetal-macOS.xcodeproj/project.pbxproj | sort -u)"
+          test "$marketing_versions" = "$version"
+          ! rg -n 'com\.StevenAtkinson|StartAutomating|0\.0\.1' \
+            NeuralAmpModeler/config.h NeuralAmpModeler/resources/*.plist \
+            NeuralAmpModeler/installer NeuralAmpModeler/projects/DessMetal-macOS.xcodeproj/project.pbxproj \
+            common-mac.xcconfig
+
+      - name: Build and dry-run the complete unsigned installer pipeline
+        run: bash package_mac.sh --unsigned
+
+      - name: Verify formats, architectures, resources, and AU
+        run: |
+          set -Eeuo pipefail
+          app="$PRODUCT_ROOT/Applications/DessMetal.app"
+          au="$PRODUCT_ROOT/Components/DessMetal.component"
+          vst3="$PRODUCT_ROOT/VST3/DessMetal.vst3"
+          expected_irs=$'ENGL-5150-V30-Mix.wav\nENGL-5153-V30-Sheffield-Mix.wav\nENGL-MIX.wav\nENGL-ORG.1.wav\nENGL-V30-1.wav\nENGL-V30-2.wav\nENGL-V30-3.wav\nENGL-V30-4.wav\nENGL-V30-Sheffield-Mix.wav\nENGL-V30-UK-SM57+E609.1.wav\nENGL-V30.wav\nbeasty-trio.wav\ncutout-switch.wav\nerretic-bloodbath.wav\nesele-dying.wav\npolestar.wav'
+          for bundle in "$app" "$au" "$vst3"; do
+            test -d "$bundle"
+            binary="$bundle/Contents/MacOS/DessMetal"
+            archs="$(lipo -archs "$binary")"
+            [[ " $archs " == *" arm64 "* && " $archs " == *" x86_64 "* ]]
+            test -f "$bundle/Contents/Resources/models/DessTortion-blue/DessTortion-blue.nam"
+            test -f "$bundle/Contents/Resources/models/DessTortion-red/DessTortion-red.nam"
+            test -f "$bundle/Contents/Resources/models/DessBlock-green/model.nam"
+            test -f "$bundle/Contents/Resources/models/SickDess/SickDess.nam"
+            test -f "$bundle/Contents/Resources/models/DessDrive/OD808.nam"
+            test -f "$bundle/Contents/Resources/models/DessDrive/SD1.nam"
+            test -f "$bundle/Contents/Resources/models/DessDrive/TS9.nam"
+            test -f "$bundle/Contents/Resources/models/DessDrive/aesahaettr.nam"
+            actual_irs="$(cd "$bundle/Contents/Resources/IRs" && \
+              find . -type f -iname '*.wav' -print | sed 's|^./||' | LC_ALL=C sort)"
+            test "$actual_irs" = "$expected_irs"
+            codesign --verify --strict "$bundle"
+          done
+          out_dir="NeuralAmpModeler/build-mac/out"
+          prefix="$out_dir/DessMetal-v${DESSMETAL_VERSION}-mac-UNSIGNED-VALIDATION-ONLY"
+          pkg="$prefix.pkg"
+          dmg="$prefix.dmg"
+          dsym="${prefix}-dSYMs.zip"
+          manifest="${prefix}-ARTIFACTS.txt"
+          test -f "$pkg" && test -f "$dmg" && test -f "$dsym" && test -f "$manifest"
+          pkgutil --expand "$pkg" "$RUNNER_TEMP/expanded-installer"
+          test -f "$RUNNER_TEMP/expanded-installer/Distribution"
+          hdiutil verify "$dmg"
+          (
+            cd "$out_dir"
+            shasum -a 256 -c "$(basename "$pkg.sha256")" "$(basename "$dmg.sha256")"
+            shasum -a 256 -c "$(basename "$manifest")"
+          )
+          dmg_mount="$RUNNER_TEMP/dessmetal-dmg"
+          mkdir -p "$dmg_mount"
+          hdiutil attach -readonly -nobrowse -mountpoint "$dmg_mount" "$dmg"
+          trap 'hdiutil detach "$dmg_mount" >/dev/null 2>&1 || true' EXIT
+          for license in RtAudio-MIT.txt RtMidi-MIT.txt nlohmann-json-MIT.txt stb-MIT.txt; do
+            test -f "$dmg_mount/THIRD_PARTY_LICENSES/$license"
+          done
+          hdiutil detach "$dmg_mount"
+          trap - EXIT
+          mkdir -p "$HOME/Library/Audio/Plug-Ins/Components"
+          rm -rf "$HOME/Library/Audio/Plug-Ins/Components/DessMetal.component"
+          ditto "$au" "$HOME/Library/Audio/Plug-Ins/Components/DessMetal.component"
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          bash NeuralAmpModeler/tests/run_au_state_migration_test.sh
+          auval -strict -v aufx 1YEo AdMs
+          auval -strict -stress 15 -v aufx 1YEo AdMs
+          bash AudioDSPTools/tests/run_au_offline_test.sh
+
+      - name: Build the official Steinberg VST3 validator from pinned source
+        env:
+          VST3SDK_COMMIT: 9fad9770f2ae8542ab1a548a68c1ad1ac690abe0
+        run: |
+          set -Eeuo pipefail
+          sdk="$RUNNER_TEMP/vst3sdk"
+          git init "$sdk"
+          git -C "$sdk" remote add origin https://github.com/steinbergmedia/vst3sdk.git
+          git -C "$sdk" fetch --depth 1 origin "$VST3SDK_COMMIT"
+          git -C "$sdk" checkout --detach FETCH_HEAD
+          test "$(git -C "$sdk" rev-parse HEAD)" = "$VST3SDK_COMMIT"
+          git -C "$sdk" submodule update --init --depth 1 base cmake pluginterfaces public.sdk
+          if git -C "$sdk" submodule status base cmake pluginterfaces public.sdk | rg '^[+-]'; then
+            echo 'Pinned Steinberg SDK submodules did not resolve exactly.' >&2
+            exit 1
+          fi
+          cmake -S "$sdk" -B "$RUNNER_TEMP/vst3sdk-build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSMTG_ENABLE_VST3_PLUGIN_EXAMPLES=OFF \
+            -DSMTG_ENABLE_VST3_HOSTING_EXAMPLES=ON \
+            -DSMTG_ENABLE_VSTGUI_SUPPORT=OFF
+          cmake --build "$RUNNER_TEMP/vst3sdk-build" --target validator -j 4
+
+      - name: Validate the exact staged VST3 with Steinberg's validator
+        run: |
+          set -Eeuo pipefail
+          validator="$RUNNER_TEMP/vst3sdk-build/bin/Release/validator"
+          vst3="$PRODUCT_ROOT/VST3/DessMetal.vst3"
+          test -x "$validator"
+          "$validator" "$vst3"
+          "$validator" -e "$vst3"
+
+      # This workflow never imports credentials, uploads or retains product
+      # artifacts, notarizes, creates tags, or publishes a release.

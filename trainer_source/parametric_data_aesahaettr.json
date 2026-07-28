@@ -1,0 +1,72 @@
+{
+    "type": "shared_in_multi_out",
+    "common": {
+        "nx": 64,
+        "input_gain": 0.0,
+        "delay": 0,
+        "allow_unequal_lengths": true,
+        "x_path": "trainer_source/training_data/input.wav"
+    },
+    "train": {
+        "outputs": [
+            {
+                "y_path": "NeuralAmpModeler/resources/models/parametric-training-files/aesahaettr/ashettr-tone-0#02.wav",
+                "g_vector": [
+                    0.0
+                ]
+            },
+            {
+                "y_path": "NeuralAmpModeler/resources/models/parametric-training-files/aesahaettr/ashettr-tone-1.5#01.wav",
+                "g_vector": [
+                    0.15
+                ]
+            },
+            {
+                "y_path": "NeuralAmpModeler/resources/models/parametric-training-files/aesahaettr/ashettr-tone-3#01.wav",
+                "g_vector": [
+                    0.3
+                ]
+            },
+            {
+                "y_path": "NeuralAmpModeler/resources/models/parametric-training-files/aesahaettr/ashettr-tone-4.5#01.wav",
+                "g_vector": [
+                    0.45
+                ]
+            },
+            {
+                "y_path": "NeuralAmpModeler/resources/models/parametric-training-files/aesahaettr/ashettr-tone-5.5#01.wav",
+                "g_vector": [
+                    0.55
+                ]
+            },
+            {
+                "y_path": "NeuralAmpModeler/resources/models/parametric-training-files/aesahaettr/ashettr-tone-7#01.wav",
+                "g_vector": [
+                    0.7
+                ]
+            },
+            {
+                "y_path": "NeuralAmpModeler/resources/models/parametric-training-files/aesahaettr/ashettr-tone-8.5#01.wav",
+                "g_vector": [
+                    0.85
+                ]
+            },
+            {
+                "y_path": "NeuralAmpModeler/resources/models/parametric-training-files/aesahaettr/ashettr-tone-10#01.wav",
+                "g_vector": [
+                    1.0
+                ]
+            }
+        ]
+    },
+    "validation": {
+        "outputs": [
+            {
+                "y_path": "NeuralAmpModeler/resources/models/parametric-training-files/aesahaettr/ashettr-tone-5.5#01.wav",
+                "g_vector": [
+                    0.55
+                ]
+            }
+        ]
+    }
+}

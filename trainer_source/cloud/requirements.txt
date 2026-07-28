@@ -1,0 +1,14 @@
+# NAM Training Dependencies
+pytorch-lightning>=2.0.0
+auraloss>=0.4.0
+soundfile>=0.12.0
+numpy>=1.24.0
+scipy>=1.10.0
+matplotlib>=3.7.0
+tensorboard>=2.14.0
+google-cloud-storage>=2.10.0
+pydantic>=2.0.0
+transformers>=4.30.0
+sounddevice>=0.4.6
+wavio>=0.0.4
+tqdm>=4.65.0

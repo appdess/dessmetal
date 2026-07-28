@@ -1,0 +1,120 @@
+stages:
+  - build
+
+.build_job:
+  stage: build
+  before_script:
+    - bash -n ./package_mac.sh NeuralAmpModeler/tests/run_unserialization_layout_tests.sh NeuralAmpModeler/tests/run_au_state_migration_test.sh
+    - bash NeuralAmpModeler/tests/run_unserialization_layout_tests.sh
+
+validate_mac:
+  extends: .build_job
+  tags: [saas-macos-large-m2pro]
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+  script:
+    - bash ./package_mac.sh --unsigned
+
+build_mac_release:
+  extends: .build_job
+  tags: [saas-macos-large-m2pro]
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: manual
+    - when: never
+  artifacts:
+    expire_in: 1 week
+    paths:
+      # This directory is populated only after the explicit manual tagged job
+      # builds successfully. Starting the job therefore authorizes GitLab to
+      # retain these exact signed build outputs, but does not publish a release.
+      - gitlab-release-artifacts/
+  script:
+    # 1. Prepare Keychain for Signing
+    - |
+      set -Eeuo pipefail
+      umask 077
+      : "${MACOS_CERTIFICATE_P12:?Missing MACOS_CERTIFICATE_P12}"
+      : "${MACOS_CERTIFICATE_PASSWORD:?Missing MACOS_CERTIFICATE_PASSWORD}"
+      : "${MACOS_INSTALLER_CERT_P12:?Missing MACOS_INSTALLER_CERT_P12}"
+      : "${MACOS_INSTALLER_CERT_PASSWORD:?Missing MACOS_INSTALLER_CERT_PASSWORD}"
+      signing_root="$CI_PROJECT_DIR/.gitlab-signing-$CI_JOB_ID"
+      keychain="$signing_root/keychain-db"
+      app_p12="$signing_root/application.p12"
+      installer_p12="$signing_root/installer.p12"
+      prior_keychains_file="$signing_root/prior-keychains.txt"
+      keychain_password="$(openssl rand -hex 32)"
+      mkdir -m 700 "$signing_root"
+      security list-keychains -d user > "$prior_keychains_file"
+      printf '%s' "$MACOS_CERTIFICATE_P12" | /usr/bin/base64 -D > "$app_p12"
+      printf '%s' "$MACOS_INSTALLER_CERT_P12" | /usr/bin/base64 -D > "$installer_p12"
+      chmod 600 "$app_p12" "$installer_p12"
+      security create-keychain -p "$keychain_password" "$keychain"
+      security set-keychain-settings -lut 7200 "$keychain"
+      security unlock-keychain -p "$keychain_password" "$keychain"
+      prior_keychains=()
+      while IFS= read -r prior_keychain; do
+        prior_keychain="${prior_keychain//\"/}"
+        prior_keychain="$(printf '%s' "$prior_keychain" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        if [ -n "$prior_keychain" ]; then
+          case "$prior_keychain" in
+            /*) prior_keychains+=("$prior_keychain") ;;
+            *) echo "Invalid prior keychain path: $prior_keychain" >&2; exit 1 ;;
+          esac
+        fi
+      done < "$prior_keychains_file"
+      if [ "${#prior_keychains[@]}" -gt 0 ]; then
+        security list-keychains -d user -s "$keychain" "${prior_keychains[@]}"
+      else
+        security list-keychains -d user -s "$keychain"
+      fi
+      security import "$app_p12" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+      security import "$installer_p12" -k "$keychain" -P "$MACOS_INSTALLER_CERT_PASSWORD" \
+        -T /usr/bin/productbuild -T /usr/bin/productsign
+      security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
+      security find-identity -v -p codesigning "$keychain" | \
+        grep -F 'Developer ID Application: Alexander Dess (6756YXU4J7)'
+      security find-identity -v "$keychain" | \
+        grep -F 'Developer ID Installer: Alexander Dess (6756YXU4J7)'
+
+    # 2. Build and Package
+    - bash ./package_mac.sh
+    - |
+      version="$(awk -F '"' '/^#define PLUG_VERSION_STR / { print $2; exit }' NeuralAmpModeler/config.h)"
+      base="NeuralAmpModeler/build-mac/out/DessMetal-v${version}-mac"
+      mkdir -p gitlab-release-artifacts
+      for artifact in \
+        "${base}.pkg" "${base}.pkg.sha256" \
+        "${base}.dmg" "${base}.dmg.sha256" \
+        "${base}-dSYMs.zip" "${base}-ARTIFACTS.txt"; do
+        test -f "$artifact"
+        cp "$artifact" gitlab-release-artifacts/
+      done
+      test "$(find gitlab-release-artifacts -type f | wc -l | tr -d ' ')" = 6
+  after_script:
+    - |
+      signing_root="$CI_PROJECT_DIR/.gitlab-signing-$CI_JOB_ID"
+      keychain="$signing_root/keychain-db"
+      prior_keychains_file="$signing_root/prior-keychains.txt"
+      if [ -f "$prior_keychains_file" ]; then
+        prior_keychains=()
+        while IFS= read -r prior_keychain; do
+          prior_keychain="${prior_keychain//\"/}"
+          prior_keychain="$(printf '%s' "$prior_keychain" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+          if [ -n "$prior_keychain" ]; then
+            case "$prior_keychain" in
+              /*) prior_keychains+=("$prior_keychain") ;;
+              # Cleanup must continue even when a saved restore entry is malformed.
+              *) echo "Skipping invalid prior keychain restore entry: $prior_keychain" >&2 ;;
+            esac
+          fi
+        done < "$prior_keychains_file"
+        if [ "${#prior_keychains[@]}" -gt 0 ]; then
+          security list-keychains -d user -s "${prior_keychains[@]}" || true
+        fi
+      fi
+      security delete-keychain "$keychain" 2>/dev/null || true
+      if [ -d "$signing_root" ]; then
+        find "$signing_root" -depth -delete
+      fi

@@ -1,0 +1,5 @@
+{
+    "ESR": 0.008738,
+    "MSE": 0.000551,
+    "Checkpoint": "epoch=0349_step=85050_ESR=8.738e-03_MSE=5.510e-04.ckpt"
+}

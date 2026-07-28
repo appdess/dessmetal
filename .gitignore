@@ -1,0 +1,52 @@
+.DS_Store
+xcuserdata
+*.RPP-bak
+build-*
+.idea/
+
+*.ipch
+*.db
+*.suo
+*/.vs
+*.pem
+mkcert*
+
+NeuralAmpModeler/*.wav
+NeuralAmpModeler/peaks/
+
+# Build logs
+build_log*.txt
+*.log
+
+# VS Code
+.vscode/
+
+# Xcode
+*.xcworkspace
+build/
+
+# Other
+Bin/
+
+# Certificates
+*.p12
+*.pfx
+
+# Application Outputs
+outputs/
+poc_output/
+NeuralAmpModeler/resources/models/parametric-training-files/
+
+# Private local presentation notes
+/demo-notes/
+/.gitlab-signing-*/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Temporary Build Artifacts
+temp_payload_au/
+temp_pkg/
+temp_tsm1n3/
