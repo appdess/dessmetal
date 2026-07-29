@@ -153,7 +153,7 @@ The local GitHub workflows implement:
 
 - pull-request, main, and manual validation that imports no signing/notarization credentials;
 - a trusted same-repository PR dispatcher that binds the GitHub merge commit, queues the protected Codex Security
-  scan, uploads SARIF to the PR merge ref, and publishes the required `Codex Security / standard` status;
+  scan, and uploads SARIF to the PR merge ref for enforcement by GitHub's native code-scanning rule;
 - a protected manual or PR-dispatched Codex Security scan that uses GitHub OIDC and OpenAI workload identity
   federation instead of a stored OpenAI API key;
 - a manually dispatched Developer ID signing operation;
@@ -182,8 +182,9 @@ the service account can only read model metadata and make model requests.
 The PR dispatcher uses `pull_request_target` only as a trusted control plane: it checks out the generated merge commit
 as data, executes no repository-owned script, rejects fork heads, and dispatches the scanner on `main`. This preserves
 the existing WIF mapping's exact `refs/heads/main`, workflow path, `workflow_dispatch`, and protected-environment
-claims. The scanner posts its final status to the exact generated PR merge commit and uploads SARIF against
-`refs/pull/<number>/merge`, so high/critical findings are visible in GitHub Code Scanning before they block the merge.
+claims. The scanner uploads SARIF against the exact generated PR merge commit at `refs/pull/<number>/merge`. The
+protected `main` ruleset requires a result from the `Codex Security` code-scanning tool and is configured to block
+every finding, including notes. Missing or invalid results also leave the merge blocked.
 
 The scan exchanges GitHub's signed job identity for a short-lived OpenAI token, verifies the expected OIDC claims,
 and gives each token only to Codex's guarded provider-auth process. The scanner's mandatory API-key login bootstrap
@@ -195,8 +196,8 @@ the host PID namespace, GitHub identity environment, `CODEX_HOME`, and direct ne
 sandbox. A host-owned command helper refreshes the token during longer scans. Raw tokens and raw scanner output remain
 ephemeral in named runner-temporary paths, including the scanner state database and stderr, and the unconditional
 cleanup removes them. A completed, sealed scan retains only a strict sanitized attestation
-and sends SARIF directly to GitHub Code Scanning; high/critical findings are retained there before the final workflow
-step fails closed. Incomplete or invalid scan output is rejected. The service account's automatically created
+and sends SARIF directly to GitHub Code Scanning for native ruleset enforcement. Incomplete or invalid scan output
+is rejected and cannot satisfy the rule. The service account's automatically created
 bootstrap API key was revoked without being copied or stored. Run the fixed `proof` mode before relying on a new or
 changed trust mapping.
 
