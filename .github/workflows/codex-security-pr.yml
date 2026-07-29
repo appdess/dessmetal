@@ -8,9 +8,9 @@ on:
 
 permissions:
   actions: write
+  checks: write
   contents: read
   pull-requests: read
-  statuses: write
 
 concurrency:
   group: codex-security-pr-${{ github.event.pull_request.number }}
@@ -42,21 +42,34 @@ jobs:
           PULL_REQUEST_BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name }}
         run: |
           set -Eeuo pipefail
-          post_status() {
-            local state="$1"
-            local description="$2"
-            gh api --method POST \
-              "/repos/$GITHUB_REPOSITORY/statuses/$source_commit" \
-              -f state="$state" \
-              -f context='Codex Security / standard' \
-              -f description="$description" \
-              -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/workflows/codex-security.yml" \
-              >/dev/null
+          check_run_id=
+          complete_check() {
+            local conclusion="$1"
+            local title="$2"
+            local summary="$3"
+            jq -n \
+              --arg conclusion "$conclusion" \
+              --arg completed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --arg details_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+              --arg title "$title" \
+              --arg summary "$summary" \
+              '{
+                status: "completed",
+                conclusion: $conclusion,
+                completed_at: $completed_at,
+                details_url: $details_url,
+                output: {title: $title, summary: $summary}
+              }' | gh api --method PATCH \
+                "/repos/$GITHUB_REPOSITORY/check-runs/$check_run_id" \
+                --input - \
+                >/dev/null
           }
           report_failure() {
             local exit_code=$?
-            if [[ "$exit_code" -ne 0 ]]; then
-              post_status failure "Codex Security dispatch or trust validation failed" || true
+            if [[ "$exit_code" -ne 0 && -n "$check_run_id" ]]; then
+              complete_check failure \
+                "Codex Security dispatch failed" \
+                "The trusted dispatcher could not queue the protected scan." || true
             fi
             exit "$exit_code"
           }
@@ -80,7 +93,37 @@ jobs:
           source_hash="$(git archive --format=tar HEAD | sha256sum | awk '{print $1}')"
           [[ "$source_hash" =~ ^[0-9a-f]{64}$ ]]
 
-          post_status pending "Codex Security protected scan is queued"
+          check_external_id="dessmetal-codex-pr-$PULL_REQUEST_NUMBER-$source_commit"
+          check_json="$(
+            jq -n \
+              --arg name 'Codex Security / standard' \
+              --arg head_sha "$source_commit" \
+              --arg external_id "$check_external_id" \
+              --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --arg details_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/workflows/codex-security.yml" \
+              --arg title 'Codex Security queued' \
+              --arg summary 'Waiting for the protected keyless Codex Security scan.' \
+              '{
+                name: $name,
+                head_sha: $head_sha,
+                external_id: $external_id,
+                status: "in_progress",
+                started_at: $started_at,
+                details_url: $details_url,
+                output: {title: $title, summary: $summary}
+              }' | gh api --method POST \
+                "/repos/$GITHUB_REPOSITORY/check-runs" \
+                --input -
+          )"
+          check_run_id="$(jq -er '.id' <<< "$check_json")"
+          [[ "$check_run_id" =~ ^[1-9][0-9]*$ ]]
+          test "$(jq -r '.name' <<< "$check_json")" = 'Codex Security / standard'
+          test "$(jq -r '.head_sha' <<< "$check_json")" = "$source_commit"
+          test "$(jq -r '.external_id' <<< "$check_json")" = "$check_external_id"
+          test "$(jq -r '.status' <<< "$check_json")" = in_progress
+          test "$(jq -r '.app.id' <<< "$check_json")" = 15368
+          test "$(jq -r '.app.slug' <<< "$check_json")" = github-actions
+
           confirmation="SCAN DESSMETAL standard $source_commit"
           jq -n \
             --arg ref main \
@@ -90,6 +133,7 @@ jobs:
             --arg confirmation "$confirmation" \
             --arg pull_request_number "$PULL_REQUEST_NUMBER" \
             --arg pull_request_head_sha "$PULL_REQUEST_HEAD_SHA" \
+            --arg pull_request_check_run_id "$check_run_id" \
             '{
               ref: $ref,
               inputs: {
@@ -100,7 +144,8 @@ jobs:
                 max_cost_usd: "5",
                 confirmation: $confirmation,
                 pull_request_number: $pull_request_number,
-                pull_request_head_sha: $pull_request_head_sha
+                pull_request_head_sha: $pull_request_head_sha,
+                pull_request_check_run_id: $pull_request_check_run_id
               }
             }' | gh api --method POST \
               "/repos/$GITHUB_REPOSITORY/actions/workflows/codex-security.yml/dispatches" \

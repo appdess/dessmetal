@@ -41,6 +41,10 @@ on:
         description: Exact PR head SHA used to bind the generated merge commit
         required: false
         type: string
+      pull_request_check_run_id:
+        description: GitHub Actions check run created by the trusted PR dispatcher
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -55,6 +59,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
+      checks: read
       contents: read
       pull-requests: read
     outputs:
@@ -65,6 +70,7 @@ jobs:
       max_cost_usd: ${{ steps.verify.outputs.max_cost_usd }}
       pull_request_number: ${{ steps.verify.outputs.pull_request_number }}
       pull_request_head_sha: ${{ steps.verify.outputs.pull_request_head_sha }}
+      pull_request_check_run_id: ${{ steps.verify.outputs.pull_request_check_run_id }}
       code_scanning_ref: ${{ steps.verify.outputs.code_scanning_ref }}
     steps:
       # v4.2.2, resolved from the official actions/checkout repository.
@@ -87,6 +93,7 @@ jobs:
           CONFIRMATION: ${{ inputs.confirmation }}
           PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
           PULL_REQUEST_HEAD_SHA: ${{ inputs.pull_request_head_sha }}
+          PULL_REQUEST_CHECK_RUN_ID: ${{ inputs.pull_request_check_run_id }}
         run: |
           set -Eeuo pipefail
           test "$GITHUB_REF" = refs/heads/main
@@ -105,6 +112,7 @@ jobs:
           if [[ -n "$PULL_REQUEST_NUMBER" ]]; then
             [[ "$PULL_REQUEST_NUMBER" =~ ^[1-9][0-9]*$ ]]
             [[ "$PULL_REQUEST_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$PULL_REQUEST_CHECK_RUN_ID" =~ ^[1-9][0-9]*$ ]]
             test "$SCAN_MODE" = standard
             test -z "$RELEASE_TAG"
 
@@ -118,9 +126,21 @@ jobs:
             test "$(git rev-list --parents -n 1 HEAD | awk '{ print NF }')" = 3
             test "$(git rev-parse HEAD^1)" = "$(jq -r '.base.sha' <<< "$pr_json")"
             test "$(git rev-parse HEAD^2)" = "$PULL_REQUEST_HEAD_SHA"
+
+            check_json="$(gh api "/repos/$GITHUB_REPOSITORY/check-runs/$PULL_REQUEST_CHECK_RUN_ID")"
+            test "$(jq -r '.id' <<< "$check_json")" = "$PULL_REQUEST_CHECK_RUN_ID"
+            test "$(jq -r '.name' <<< "$check_json")" = 'Codex Security / standard'
+            test "$(jq -r '.head_sha' <<< "$check_json")" = "$SOURCE_COMMIT"
+            test "$(jq -r '.external_id' <<< "$check_json")" = \
+              "dessmetal-codex-pr-$PULL_REQUEST_NUMBER-$SOURCE_COMMIT"
+            test "$(jq -r '.status' <<< "$check_json")" = in_progress
+            test "$(jq -r '.conclusion' <<< "$check_json")" = null
+            test "$(jq -r '.app.id' <<< "$check_json")" = 15368
+            test "$(jq -r '.app.slug' <<< "$check_json")" = github-actions
             code_scanning_ref="refs/pull/$PULL_REQUEST_NUMBER/merge"
           else
             test -z "$PULL_REQUEST_HEAD_SHA"
+            test -z "$PULL_REQUEST_CHECK_RUN_ID"
             test "$GITHUB_SHA" = "$SOURCE_COMMIT"
           fi
 
@@ -140,6 +160,7 @@ jobs:
             printf 'max_cost_usd=%s\n' "$MAX_COST_USD"
             printf 'pull_request_number=%s\n' "$PULL_REQUEST_NUMBER"
             printf 'pull_request_head_sha=%s\n' "$PULL_REQUEST_HEAD_SHA"
+            printf 'pull_request_check_run_id=%s\n' "$PULL_REQUEST_CHECK_RUN_ID"
             printf 'code_scanning_ref=%s\n' "$code_scanning_ref"
           } >> "$GITHUB_OUTPUT"
 
@@ -168,6 +189,7 @@ jobs:
       MAX_COST_USD: ${{ needs.gate.outputs.max_cost_usd }}
       PULL_REQUEST_NUMBER: ${{ needs.gate.outputs.pull_request_number }}
       PULL_REQUEST_HEAD_SHA: ${{ needs.gate.outputs.pull_request_head_sha }}
+      PULL_REQUEST_CHECK_RUN_ID: ${{ needs.gate.outputs.pull_request_check_run_id }}
       CODE_SCANNING_REF: ${{ needs.gate.outputs.code_scanning_ref }}
     steps:
       # v4.4.0, resolved from the official actions/setup-node repository.
@@ -1051,17 +1073,21 @@ jobs:
 
           pull_request_number_text = os.environ.get("PULL_REQUEST_NUMBER", "")
           pull_request_head_sha = os.environ.get("PULL_REQUEST_HEAD_SHA", "")
+          pull_request_check_run_id_text = os.environ.get("PULL_REQUEST_CHECK_RUN_ID", "")
           code_scanning_ref = os.environ["CODE_SCANNING_REF"]
           if pull_request_number_text:
               if not pull_request_number_text.isdigit() or int(pull_request_number_text) <= 0:
                   raise SystemExit("invalid pull request number")
               if not re.fullmatch(r"[0-9a-f]{40}", pull_request_head_sha):
                   raise SystemExit("invalid pull request head commit")
+              if not pull_request_check_run_id_text.isdigit() or int(pull_request_check_run_id_text) <= 0:
+                  raise SystemExit("invalid pull request check run")
               if code_scanning_ref != f"refs/pull/{pull_request_number_text}/merge":
                   raise SystemExit("invalid pull request code-scanning ref")
               pull_request_number = int(pull_request_number_text)
+              pull_request_check_run_id = int(pull_request_check_run_id_text)
           else:
-              if pull_request_head_sha or code_scanning_ref != "refs/heads/main":
+              if pull_request_head_sha or pull_request_check_run_id_text or code_scanning_ref != "refs/heads/main":
                   raise SystemExit("unexpected pull request metadata")
               pull_request_number = None
 
@@ -1101,6 +1127,7 @@ jobs:
                       "schema": "dessmetal.codex-security-pr-attestation.v1",
                       "pull_request_number": pull_request_number,
                       "pull_request_head_sha": pull_request_head_sha,
+                      "pull_request_check_run_id": pull_request_check_run_id,
                       "code_scanning_ref": code_scanning_ref,
                   }
               )
@@ -1218,22 +1245,27 @@ jobs:
             "$RUNNER_TEMP/dessmetal-codex-security.sarif"
 
   report_pull_request:
-    name: Report Codex Security PR status
-    if: always() && inputs.pull_request_number != '' && inputs.pull_request_head_sha != ''
+    name: Complete Codex Security PR check
+    if: >-
+      always() &&
+      inputs.pull_request_number != '' &&
+      inputs.pull_request_head_sha != '' &&
+      inputs.pull_request_check_run_id != ''
     needs:
       - gate
       - scan
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
+      checks: write
       contents: read
-      statuses: write
     steps:
-      - name: Publish the required GitHub-owned merge status
+      - name: Complete the required GitHub Actions check run
         env:
           GH_TOKEN: ${{ github.token }}
           PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
           PULL_REQUEST_HEAD_SHA: ${{ inputs.pull_request_head_sha }}
+          PULL_REQUEST_CHECK_RUN_ID: ${{ inputs.pull_request_check_run_id }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
           GATE_RESULT: ${{ needs.gate.result }}
           SCAN_RESULT: ${{ needs.scan.result }}
@@ -1241,16 +1273,50 @@ jobs:
           set -Eeuo pipefail
           [[ "$PULL_REQUEST_NUMBER" =~ ^[1-9][0-9]*$ ]]
           [[ "$PULL_REQUEST_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PULL_REQUEST_CHECK_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
-          state=failure
-          description="Codex Security did not pass"
+
+          check_json="$(gh api "/repos/$GITHUB_REPOSITORY/check-runs/$PULL_REQUEST_CHECK_RUN_ID")"
+          test "$(jq -r '.id' <<< "$check_json")" = "$PULL_REQUEST_CHECK_RUN_ID"
+          test "$(jq -r '.name' <<< "$check_json")" = 'Codex Security / standard'
+          test "$(jq -r '.head_sha' <<< "$check_json")" = "$SOURCE_COMMIT"
+          test "$(jq -r '.external_id' <<< "$check_json")" = \
+            "dessmetal-codex-pr-$PULL_REQUEST_NUMBER-$SOURCE_COMMIT"
+          test "$(jq -r '.status' <<< "$check_json")" = in_progress
+          test "$(jq -r '.conclusion' <<< "$check_json")" = null
+          test "$(jq -r '.app.id' <<< "$check_json")" = 15368
+          test "$(jq -r '.app.slug' <<< "$check_json")" = github-actions
+
+          conclusion=failure
+          title="Codex Security failed"
+          summary="The protected scan or its immutable-input gate did not pass."
           if [[ "$GATE_RESULT" == success && "$SCAN_RESULT" == success ]]; then
-            state=success
-            description="Codex Security passed with no blocking findings"
+            conclusion=success
+            title="Codex Security passed"
+            summary="The protected keyless scan completed with no high/critical findings. SARIF was uploaded to GitHub Code Scanning."
           fi
-          gh api --method POST \
-            "/repos/$GITHUB_REPOSITORY/statuses/$SOURCE_COMMIT" \
-            -f state="$state" \
-            -f context='Codex Security / standard' \
-            -f description="$description" \
-            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          details_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          result_json="$(
+            jq -n \
+              --arg conclusion "$conclusion" \
+              --arg completed_at "$completed_at" \
+              --arg details_url "$details_url" \
+              --arg title "$title" \
+              --arg summary "$summary" \
+              '{
+                status: "completed",
+                conclusion: $conclusion,
+                completed_at: $completed_at,
+                details_url: $details_url,
+                output: {title: $title, summary: $summary}
+              }' | gh api --method PATCH \
+                "/repos/$GITHUB_REPOSITORY/check-runs/$PULL_REQUEST_CHECK_RUN_ID" \
+                --input -
+          )"
+          test "$(jq -r '.id' <<< "$result_json")" = "$PULL_REQUEST_CHECK_RUN_ID"
+          test "$(jq -r '.head_sha' <<< "$result_json")" = "$SOURCE_COMMIT"
+          test "$(jq -r '.status' <<< "$result_json")" = completed
+          test "$(jq -r '.conclusion' <<< "$result_json")" = "$conclusion"
+          test "$(jq -r '.details_url' <<< "$result_json")" = "$details_url"
+          test "$(jq -r '.app.id' <<< "$result_json")" = 15368

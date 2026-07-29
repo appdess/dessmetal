@@ -153,7 +153,7 @@ The local GitHub workflows implement:
 
 - pull-request, main, and manual validation that imports no signing/notarization credentials;
 - a trusted same-repository PR dispatcher that binds the GitHub merge commit, queues the protected Codex Security
-  scan, uploads SARIF to the PR merge ref, and publishes the required `Codex Security / standard` status;
+  scan, uploads SARIF to the PR merge ref, and completes the required `Codex Security / standard` check run;
 - a protected manual or PR-dispatched Codex Security scan that uses GitHub OIDC and OpenAI workload identity
   federation instead of a stored OpenAI API key;
 - a manually dispatched Developer ID signing operation;
@@ -182,8 +182,9 @@ the service account can only read model metadata and make model requests.
 The PR dispatcher uses `pull_request_target` only as a trusted control plane: it checks out the generated merge commit
 as data, executes no repository-owned script, rejects fork heads, and dispatches the scanner on `main`. This preserves
 the existing WIF mapping's exact `refs/heads/main`, workflow path, `workflow_dispatch`, and protected-environment
-claims. The scanner posts its final status to the exact generated PR merge commit and uploads SARIF against
-`refs/pull/<number>/merge`, so high/critical findings are visible in GitHub Code Scanning before they block the merge.
+claims. The trusted dispatcher creates a GitHub-Actions-owned check run on the exact generated PR merge commit; the
+scanner completes that check and uploads SARIF against `refs/pull/<number>/merge`, so high/critical findings are
+visible in GitHub Code Scanning before they block the merge.
 
 The scan exchanges GitHub's signed job identity for a short-lived OpenAI token, verifies the expected OIDC claims,
 and gives each token only to Codex's guarded provider-auth process. The scanner's mandatory API-key login bootstrap
