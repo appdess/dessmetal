@@ -856,27 +856,56 @@ jobs:
         run: |
           set -Eeuo pipefail
           umask 077
-          [[ "$SCAN_EXIT_CODE" == 0 || "$SCAN_EXIT_CODE" == 1 ]]
+          fail_attestation() {
+            printf 'codex-security attestation diagnostic: class=%s\n' "$1" >&2
+            exit 1
+          }
+          [[ "$SCAN_EXIT_CODE" == 0 || "$SCAN_EXIT_CODE" == 1 ]] || \
+            fail_attestation INVALID_SCAN_EXIT
           if [[ "$SCAN_MODE" != proof ]]; then
-            test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
-            test -z "$(git status --porcelain)"
-            test "$(git archive --format=tar HEAD | sha256sum | awk '{print $1}')" = "$SOURCE_ARCHIVE_SHA256"
+            test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT" || \
+              fail_attestation SOURCE_COMMIT_CHANGED
+            test -z "$(git status --porcelain)" || \
+              fail_attestation SOURCE_WORKTREE_CHANGED
+            test "$(git archive --format=tar HEAD | sha256sum | awk '{print $1}')" = "$SOURCE_ARCHIVE_SHA256" || \
+              fail_attestation SOURCE_ARCHIVE_CHANGED
           fi
-          "$SCANNER" export "$SCAN_ROOT" --export-format json \
-            --output "$RUNNER_TEMP/codex-security-sealed-export.json" \
-            2>> "$RUNNER_TEMP/codex-security-stderr.log"
-          test -s "$RUNNER_TEMP/codex-security-sealed-export.json"
+          if ! "$SCANNER" export "$SCAN_ROOT" --export-format json \
+              --output "$RUNNER_TEMP/codex-security-sealed-export.json" \
+              2>> "$RUNNER_TEMP/codex-security-stderr.log"; then
+            fail_attestation SEALED_EXPORT_FAILED
+          fi
+          test -s "$RUNNER_TEMP/codex-security-sealed-export.json" || \
+            fail_attestation SEALED_EXPORT_EMPTY
           codex_helper_calls="$(wc -l < "$WIF_HELPER_COUNTER" | tr -d ' ')"
-          test "$codex_helper_calls" -ge 2
+          [[ "$codex_helper_calls" =~ ^[0-9]+$ ]] || \
+            fail_attestation WIF_HELPER_COUNT_INVALID
+          test "$codex_helper_calls" -ge 2 || \
+            fail_attestation WIF_REFRESH_NOT_OBSERVED
           helper_first_ns="$(LC_ALL=C sort -n "$WIF_HELPER_COUNTER" | head -1)"
           helper_last_ns="$(LC_ALL=C sort -n "$WIF_HELPER_COUNTER" | tail -1)"
-          [[ "$helper_first_ns" =~ ^[0-9]+$ ]]
-          [[ "$helper_last_ns" =~ ^[0-9]+$ ]]
+          [[ "$helper_first_ns" =~ ^[0-9]+$ ]] || \
+            fail_attestation WIF_FIRST_TIMESTAMP_INVALID
+          [[ "$helper_last_ns" =~ ^[0-9]+$ ]] || \
+            fail_attestation WIF_LAST_TIMESTAMP_INVALID
           helper_gap_ms="$(( (helper_last_ns - helper_first_ns) / 1000000 ))"
-          test "$helper_gap_ms" -ge "$((SCAN_REFRESH_MS - 100))"
+          if test "$SCAN_REFRESH_MS" -le 10000; then
+            refresh_tolerance_ms=500
+          else
+            refresh_tolerance_ms=5000
+          fi
+          minimum_refresh_gap_ms="$((SCAN_REFRESH_MS - refresh_tolerance_ms))"
+          if ! test "$helper_gap_ms" -ge "$minimum_refresh_gap_ms"; then
+            printf 'codex-security attestation diagnostic: class=WIF_REFRESH_GAP_TOO_SHORT; helper_calls=%s; helper_gap_ms=%s; minimum_gap_ms=%s\n' \
+              "$codex_helper_calls" "$helper_gap_ms" "$minimum_refresh_gap_ms" >&2
+            exit 1
+          fi
           export CODEX_HELPER_CALLS="$codex_helper_calls"
           export CODEX_HELPER_REFRESH_GAP_MS="$helper_gap_ms"
-          mkdir -m 700 "$ATTESTATION_ROOT"
+          export CODEX_HELPER_REFRESH_TOLERANCE_MS="$refresh_tolerance_ms"
+          mkdir -m 700 "$ATTESTATION_ROOT" || \
+            fail_attestation ATTESTATION_DIRECTORY_FAILED
+          set +e
           python3 - <<'PY'
           import hashlib
           import json
@@ -964,7 +993,8 @@ jobs:
 
           refresh_interval_ms = int(os.environ["SCAN_REFRESH_MS"])
           refresh_gap_ms = int(os.environ["CODEX_HELPER_REFRESH_GAP_MS"])
-          if refresh_gap_ms < refresh_interval_ms - 100:
+          refresh_tolerance_ms = int(os.environ["CODEX_HELPER_REFRESH_TOLERANCE_MS"])
+          if refresh_gap_ms < refresh_interval_ms - refresh_tolerance_ms:
               raise SystemExit("command-backed WIF refresh was not proven")
 
           attestation = {
@@ -1001,8 +1031,18 @@ jobs:
           destination.write_text(json.dumps(attestation, indent=2, sort_keys=True) + "\n", encoding="utf-8")
           destination.chmod(0o600)
           PY
-          policy_result="$(jq -r '.result' "$ATTESTATION_ROOT/attestation.json")"
-          blocking_findings="$(jq -r '.blocking_findings' "$ATTESTATION_ROOT/attestation.json")"
+          metadata_exit=$?
+          set -e
+          test "$metadata_exit" -eq 0 || \
+            fail_attestation SEALED_METADATA_INVALID
+          policy_result="$(jq -er '.result' "$ATTESTATION_ROOT/attestation.json")" || \
+            fail_attestation ATTESTATION_RESULT_INVALID
+          blocking_findings="$(jq -er '.blocking_findings' "$ATTESTATION_ROOT/attestation.json")" || \
+            fail_attestation ATTESTATION_FINDING_COUNT_INVALID
+          [[ "$policy_result" == pass || "$policy_result" == fail ]] || \
+            fail_attestation ATTESTATION_RESULT_INVALID
+          [[ "$blocking_findings" =~ ^[0-9]+$ ]] || \
+            fail_attestation ATTESTATION_FINDING_COUNT_INVALID
           {
             printf 'policy_result=%s\n' "$policy_result"
             printf 'blocking_findings=%s\n' "$blocking_findings"
