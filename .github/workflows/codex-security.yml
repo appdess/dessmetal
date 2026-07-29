@@ -661,38 +661,170 @@ jobs:
           set -e
           unset bootstrap_credential codex_parent CODEX_API_KEY WIF_EXPECTED_CODEX_PARENT
           if [[ "$scan_exit" == 2 ]]; then
-            python3 - "$RUNNER_TEMP/codex-security-stderr.log" <<'PY'
+            python3 - \
+              "$RUNNER_TEMP/codex-security-stderr.log" \
+              "$RUNNER_TEMP/codex-security-result.json" \
+              "$CODEX_SECURITY_STATE_DIR/workbench.sqlite3" \
+              "$SCAN_ROOT" \
+              "$WIF_HELPER_COUNTER" <<'PY'
           import hashlib
+          import json
           import pathlib
           import re
+          import sqlite3
           import sys
 
-          path = pathlib.Path(sys.argv[1])
-          try:
-              raw = path.read_bytes()
-          except Exception:
-              raw = b""
-          digest = hashlib.sha256(raw).hexdigest()
-          text = raw.decode("utf-8", errors="replace")
-          cost = re.search(
-              r"^codex-security: Scan stopped: estimated cost \$([0-9]+(?:\.[0-9]{2,9})?) "
-              r"exceeded the \$([0-9]+(?:\.[0-9]{2,9})?) limit; partial output remains at .+[.]$",
-              text,
-              flags=re.MULTILINE,
+          stderr_path = pathlib.Path(sys.argv[1])
+          result_path = pathlib.Path(sys.argv[2])
+          database_path = pathlib.Path(sys.argv[3])
+          scan_root = pathlib.Path(sys.argv[4])
+          helper_counter_path = pathlib.Path(sys.argv[5])
+
+          def read_bytes(path: pathlib.Path) -> bytes:
+              try:
+                  return path.read_bytes()
+              except Exception:
+                  return b""
+
+          stderr_raw = read_bytes(stderr_path)
+          result_raw = read_bytes(result_path)
+          stderr_text = re.sub(
+              r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])",
+              "",
+              stderr_raw.decode("utf-8", errors="replace"),
           )
-          if cost:
-              print(
-                  "codex-security diagnostic (COST_LIMIT_EXCEEDED): "
-                  f"estimated cost ${cost.group(1)} exceeded configured ${cost.group(2)} limit; "
-                  f"private stderr SHA-256 {digest}",
-                  file=sys.stderr,
+          stderr_sha = hashlib.sha256(stderr_raw).hexdigest()
+          result_sha = hashlib.sha256(result_raw).hexdigest()
+
+          completeness = "unavailable"
+          structured_result = "invalid"
+          try:
+              payload = json.loads(result_raw)
+              structured_result = "valid"
+              data = payload.get("data", payload) if isinstance(payload, dict) else {}
+              coverage = data.get("coverage", {}) if isinstance(data, dict) else {}
+              candidate = coverage.get("completeness") if isinstance(coverage, dict) else None
+              if candidate in {"complete", "partial", "unknown"}:
+                  completeness = candidate
+          except Exception:
+              pass
+
+          scan_status = "unavailable"
+          scan_phase = "unavailable"
+          failure_message = ""
+          estimated_cost = "unavailable"
+          progress = "unavailable"
+          database_state = "unavailable"
+          if database_path.is_file():
+              try:
+                  connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+                  connection.row_factory = sqlite3.Row
+                  columns = {
+                      row[1]
+                      for row in connection.execute("PRAGMA table_info(scans)").fetchall()
+                  }
+                  optional_cost = ", cost_json" if "cost_json" in columns else ""
+                  row = connection.execute(
+                      "SELECT id, status, phase, failure_message"
+                      f"{optional_cost} FROM scans ORDER BY created_at DESC LIMIT 1"
+                  ).fetchone()
+                  if row is not None:
+                      database_state = "present"
+                      scan_status = row["status"]
+                      scan_phase = row["phase"]
+                      failure_message = row["failure_message"] or ""
+                      if "cost_json" in row.keys() and row["cost_json"]:
+                          try:
+                              cost = json.loads(row["cost_json"])
+                              value = cost.get("estimatedUsd")
+                              if isinstance(value, (int, float)) and value >= 0:
+                                  estimated_cost = f"{value:.9f}".rstrip("0").rstrip(".")
+                          except Exception:
+                              pass
+                      progress_row = connection.execute(
+                          "SELECT review_items_completed, review_items_total "
+                          "FROM scan_progress WHERE scan_id = ?",
+                          (row["id"],),
+                      ).fetchone()
+                      if progress_row is not None:
+                          progress = (
+                              f"{progress_row['review_items_completed']}/"
+                              f"{progress_row['review_items_total']}"
+                          )
+                  connection.close()
+              except Exception:
+                  database_state = "invalid"
+
+          canonical = {}
+          for name in ("scan-manifest.json", "coverage.json", "findings.json", "report.md"):
+              try:
+                  canonical[name] = sum(1 for _ in scan_root.rglob(name))
+              except Exception:
+                  canonical[name] = 0
+          canonical_summary = ",".join(
+              f"{name}={canonical[name]}" for name in sorted(canonical)
+          )
+
+          helper_calls = 0
+          helper_gap_ms = 0
+          try:
+              helper_timestamps = sorted(
+                  int(line)
+                  for line in helper_counter_path.read_text(encoding="utf-8").splitlines()
+                  if re.fullmatch(r"[0-9]+", line)
               )
-          else:
-              print(
-                  "codex-security diagnostic (SCAN_FAILED): private diagnostic did not match an "
-                  f"allowlisted failure; stderr SHA-256 {digest}",
-                  file=sys.stderr,
-              )
+              helper_calls = len(helper_timestamps)
+              if len(helper_timestamps) >= 2:
+                  helper_gap_ms = (
+                      helper_timestamps[-1] - helper_timestamps[0]
+                  ) // 1_000_000
+          except Exception:
+              pass
+
+          combined = f"{failure_message}\n{stderr_text}"
+          failure_class = "UNCLASSIFIED"
+          cost_match = re.search(
+              r"Scan stopped: estimated cost \$([0-9]+(?:\.[0-9]{2,9})?) "
+              r"exceeded the \$([0-9]+(?:\.[0-9]{2,9})?) limit",
+              combined,
+          )
+          if completeness in {"partial", "unknown"} or re.search(
+              r"Cannot evaluate the failure policy: coverage is (?:partial|unknown)[.]",
+              combined,
+          ):
+              failure_class = "INCOMPLETE_COVERAGE"
+          elif cost_match:
+              failure_class = "COST_LIMIT_EXCEEDED"
+          elif "Cannot evaluate the cost limit: model pricing or token usage is unavailable." in combined:
+              failure_class = "COST_TELEMETRY_UNAVAILABLE"
+          elif "The configured account reached its rate limit. Wait and retry." in combined:
+              failure_class = "RATE_LIMITED"
+          elif "Authentication failed using" in combined:
+              failure_class = "AUTHENTICATION_FAILED"
+          elif "cannot access the configured model" in combined:
+              failure_class = "MODEL_ACCESS_DENIED"
+          elif "The model service could not be reached." in combined:
+              failure_class = "NETWORK_ERROR"
+          elif "The connection timed out." in combined:
+              failure_class = "TIMEOUT"
+          elif "scan completed without a result" in combined.lower():
+              failure_class = "NO_RESULT"
+          elif "workbench" in failure_message.lower():
+              failure_class = "WORKBENCH_FAILURE"
+          elif scan_status == "failed" and any(value == 0 for value in canonical.values()):
+              failure_class = "MISSING_CANONICAL_OUTPUT"
+
+          failure_sha = hashlib.sha256(failure_message.encode("utf-8")).hexdigest()
+          print(
+              "codex-security diagnostic: "
+              f"class={failure_class}; structured_result={structured_result}; "
+              f"coverage={completeness}; state={database_state}:{scan_status}:{scan_phase}; "
+              f"estimated_cost_usd={estimated_cost}; progress={progress}; "
+              f"artifacts={canonical_summary}; helper_calls={helper_calls}; "
+              f"helper_gap_ms={helper_gap_ms}; failure_sha256={failure_sha}; "
+              f"stdout_sha256={result_sha}; stderr_sha256={stderr_sha}",
+              file=sys.stderr,
+          )
           PY
           fi
           {
