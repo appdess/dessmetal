@@ -68,10 +68,15 @@ public release.
 - [`.github/workflows/macos-ci.yml`](.github/workflows/macos-ci.yml) is the credential-free push, pull-request, and
   manual validation gate. For release signing, require a successful push or manual run on `main` for the exact
   release commit; a pull-request run alone does not satisfy the release gate.
-- [`.github/workflows/codex-security.yml`](.github/workflows/codex-security.yml) is the protected manual source-scan
-  gate. It uses GitHub OIDC and OpenAI workload identity federation; do not add a reusable OpenAI API key or expose
-  its short-lived token outside the scanner step. A release requires a successful `deep` attestation for the exact
-  tagged commit and source-archive hash.
+- [`.github/workflows/codex-security-pr.yml`](.github/workflows/codex-security-pr.yml) is the trusted PR dispatcher.
+  It runs from protected `main`, executes no PR-owned code, rejects fork heads, binds the GitHub merge commit and
+  source-archive hash, and dispatches the protected scanner. Its GitHub-Actions-owned `Codex Security / standard`
+  status is the merge gate; findings are uploaded as SARIF against the PR merge ref before the status fails closed.
+- [`.github/workflows/codex-security.yml`](.github/workflows/codex-security.yml) is the protected source-scan gate.
+  It uses GitHub OIDC and OpenAI workload identity federation; do not add a reusable OpenAI API key or expose its
+  short-lived token outside the scanner step. PR scans must enter through the trusted dispatcher and retain the
+  `workflow_dispatch`/`main` WIF boundary. A release requires a successful `deep` attestation for the exact tagged
+  commit and source-archive hash.
 - [`.github/workflows/macos-release.yml`](.github/workflows/macos-release.yml) is the authoritative manual GitHub
   chain: `sign` -> `notarize` -> `draft`. Its inputs bind an existing version tag to an exact commit, source-archive
   hash, successful CI and Codex Security runs or a prior release-workflow run, approved artifact hashes, and the

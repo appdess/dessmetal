@@ -33,6 +33,14 @@ on:
         description: Type SCAN DESSMETAL followed by the mode and exact source commit
         required: true
         type: string
+      pull_request_number:
+        description: Trusted same-repository PR number; set only by codex-security-pr.yml
+        required: false
+        type: string
+      pull_request_head_sha:
+        description: Exact PR head SHA used to bind the generated merge commit
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -46,12 +54,18 @@ jobs:
     name: Verify immutable scan inputs
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       source_commit: ${{ steps.verify.outputs.source_commit }}
       source_archive_sha256: ${{ steps.verify.outputs.source_archive_sha256 }}
       release_tag: ${{ steps.verify.outputs.release_tag }}
       scan_mode: ${{ steps.verify.outputs.scan_mode }}
       max_cost_usd: ${{ steps.verify.outputs.max_cost_usd }}
+      pull_request_number: ${{ steps.verify.outputs.pull_request_number }}
+      pull_request_head_sha: ${{ steps.verify.outputs.pull_request_head_sha }}
+      code_scanning_ref: ${{ steps.verify.outputs.code_scanning_ref }}
     steps:
       # v4.2.2, resolved from the official actions/checkout repository.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -64,16 +78,19 @@ jobs:
       - name: Fail closed unless main, commit, tag, source hash, cost, and confirmation agree
         id: verify
         env:
+          GH_TOKEN: ${{ github.token }}
           SCAN_MODE: ${{ inputs.scan_mode }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
           APPROVED_SOURCE_HASH: ${{ inputs.approved_source_archive_sha256 }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           MAX_COST_USD: ${{ inputs.max_cost_usd }}
           CONFIRMATION: ${{ inputs.confirmation }}
+          PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+          PULL_REQUEST_HEAD_SHA: ${{ inputs.pull_request_head_sha }}
         run: |
           set -Eeuo pipefail
           test "$GITHUB_REF" = refs/heads/main
-          test "$GITHUB_SHA" = "$SOURCE_COMMIT"
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           [[ "$APPROVED_SOURCE_HASH" =~ ^[0-9a-f]{64}$ ]]
           [[ "$MAX_COST_USD" =~ ^[0-9]+([.][0-9]{1,2})?$ ]]
@@ -83,6 +100,29 @@ jobs:
           test -z "$(git status --porcelain)"
           source_hash="$(git archive --format=tar HEAD | sha256sum | awk '{print $1}')"
           test "$source_hash" = "$APPROVED_SOURCE_HASH"
+
+          code_scanning_ref=refs/heads/main
+          if [[ -n "$PULL_REQUEST_NUMBER" ]]; then
+            [[ "$PULL_REQUEST_NUMBER" =~ ^[1-9][0-9]*$ ]]
+            [[ "$PULL_REQUEST_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+            test "$SCAN_MODE" = standard
+            test -z "$RELEASE_TAG"
+
+            pr_json="$(gh api "/repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST_NUMBER")"
+            test "$(jq -r '.state' <<< "$pr_json")" = open
+            test "$(jq -r '.draft' <<< "$pr_json")" = false
+            test "$(jq -r '.base.ref' <<< "$pr_json")" = main
+            test "$(jq -r '.base.repo.full_name' <<< "$pr_json")" = "$GITHUB_REPOSITORY"
+            test "$(jq -r '.head.repo.full_name' <<< "$pr_json")" = "$GITHUB_REPOSITORY"
+            test "$(jq -r '.head.sha' <<< "$pr_json")" = "$PULL_REQUEST_HEAD_SHA"
+            test "$(git rev-list --parents -n 1 HEAD | awk '{ print NF }')" = 3
+            test "$(git rev-parse HEAD^1)" = "$(jq -r '.base.sha' <<< "$pr_json")"
+            test "$(git rev-parse HEAD^2)" = "$PULL_REQUEST_HEAD_SHA"
+            code_scanning_ref="refs/pull/$PULL_REQUEST_NUMBER/merge"
+          else
+            test -z "$PULL_REQUEST_HEAD_SHA"
+            test "$GITHUB_SHA" = "$SOURCE_COMMIT"
+          fi
 
           if [[ "$SCAN_MODE" == deep ]]; then
             [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
@@ -98,6 +138,9 @@ jobs:
             printf 'release_tag=%s\n' "$RELEASE_TAG"
             printf 'scan_mode=%s\n' "$SCAN_MODE"
             printf 'max_cost_usd=%s\n' "$MAX_COST_USD"
+            printf 'pull_request_number=%s\n' "$PULL_REQUEST_NUMBER"
+            printf 'pull_request_head_sha=%s\n' "$PULL_REQUEST_HEAD_SHA"
+            printf 'code_scanning_ref=%s\n' "$code_scanning_ref"
           } >> "$GITHUB_OUTPUT"
 
   scan:
@@ -123,6 +166,9 @@ jobs:
       SOURCE_ARCHIVE_SHA256: ${{ needs.gate.outputs.source_archive_sha256 }}
       RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}
       MAX_COST_USD: ${{ needs.gate.outputs.max_cost_usd }}
+      PULL_REQUEST_NUMBER: ${{ needs.gate.outputs.pull_request_number }}
+      PULL_REQUEST_HEAD_SHA: ${{ needs.gate.outputs.pull_request_head_sha }}
+      CODE_SCANNING_REF: ${{ needs.gate.outputs.code_scanning_ref }}
     steps:
       # v4.4.0, resolved from the official actions/setup-node repository.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -192,8 +238,14 @@ jobs:
           test "$(npm --version)" = 10.9.8
           test "$GITHUB_REPOSITORY" = appdess/dessmetal
           test "$GITHUB_REF" = refs/heads/main
-          test "$GITHUB_SHA" = "$SOURCE_COMMIT"
           test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          if [[ -z "$PULL_REQUEST_NUMBER" ]]; then
+            test "$GITHUB_SHA" = "$SOURCE_COMMIT"
+          else
+            [[ "$PULL_REQUEST_NUMBER" =~ ^[1-9][0-9]*$ ]]
+            [[ "$PULL_REQUEST_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+            test "$CODE_SCANNING_REF" = "refs/pull/$PULL_REQUEST_NUMBER/merge"
+          fi
 
       - name: Install the exact approved scanner outside the checkout
         env:
@@ -997,6 +1049,22 @@ jobs:
           if refresh_gap_ms < refresh_interval_ms - refresh_tolerance_ms:
               raise SystemExit("command-backed WIF refresh was not proven")
 
+          pull_request_number_text = os.environ.get("PULL_REQUEST_NUMBER", "")
+          pull_request_head_sha = os.environ.get("PULL_REQUEST_HEAD_SHA", "")
+          code_scanning_ref = os.environ["CODE_SCANNING_REF"]
+          if pull_request_number_text:
+              if not pull_request_number_text.isdigit() or int(pull_request_number_text) <= 0:
+                  raise SystemExit("invalid pull request number")
+              if not re.fullmatch(r"[0-9a-f]{40}", pull_request_head_sha):
+                  raise SystemExit("invalid pull request head commit")
+              if code_scanning_ref != f"refs/pull/{pull_request_number_text}/merge":
+                  raise SystemExit("invalid pull request code-scanning ref")
+              pull_request_number = int(pull_request_number_text)
+          else:
+              if pull_request_head_sha or code_scanning_ref != "refs/heads/main":
+                  raise SystemExit("unexpected pull request metadata")
+              pull_request_number = None
+
           attestation = {
               "schema": "dessmetal.codex-security-attestation.v1",
               "repository": "appdess/dessmetal",
@@ -1027,6 +1095,15 @@ jobs:
               "codex_auth_helper_refresh_proven": True,
               "sealed_artifact_sha256": sealed,
           }
+          if pull_request_number is not None:
+              attestation.update(
+                  {
+                      "schema": "dessmetal.codex-security-pr-attestation.v1",
+                      "pull_request_number": pull_request_number,
+                      "pull_request_head_sha": pull_request_head_sha,
+                      "code_scanning_ref": code_scanning_ref,
+                  }
+              )
           destination = pathlib.Path(os.environ["ATTESTATION_ROOT"]) / "attestation.json"
           destination.write_text(json.dumps(attestation, indent=2, sort_keys=True) + "\n", encoding="utf-8")
           destination.chmod(0o600)
@@ -1100,6 +1177,8 @@ jobs:
         with:
           sarif_file: ${{ runner.temp }}/dessmetal-codex-security.sarif
           category: codex-security
+          ref: ${{ needs.gate.outputs.code_scanning_ref }}
+          sha: ${{ needs.gate.outputs.source_commit }}
 
       - name: Upload only the sanitized attestation
         if: always() && steps.attest.outcome == 'success' && steps.finalize.outcome == 'success'
@@ -1137,3 +1216,41 @@ jobs:
             "$RUNNER_TEMP/codex-security-info.json" \
             "$RUNNER_TEMP/codex-security-sealed-export.json" \
             "$RUNNER_TEMP/dessmetal-codex-security.sarif"
+
+  report_pull_request:
+    name: Report Codex Security PR status
+    if: always() && inputs.pull_request_number != '' && inputs.pull_request_head_sha != ''
+    needs:
+      - gate
+      - scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - name: Publish the required GitHub-owned merge status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+          PULL_REQUEST_HEAD_SHA: ${{ inputs.pull_request_head_sha }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          GATE_RESULT: ${{ needs.gate.result }}
+          SCAN_RESULT: ${{ needs.scan.result }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$PULL_REQUEST_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          [[ "$PULL_REQUEST_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          state=failure
+          description="Codex Security did not pass"
+          if [[ "$GATE_RESULT" == success && "$SCAN_RESULT" == success ]]; then
+            state=success
+            description="Codex Security passed with no blocking findings"
+          fi
+          gh api --method POST \
+            "/repos/$GITHUB_REPOSITORY/statuses/$SOURCE_COMMIT" \
+            -f state="$state" \
+            -f context='Codex Security / standard' \
+            -f description="$description" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
