@@ -133,8 +133,32 @@ jobs:
           dsym="${prefix}-dSYMs.zip"
           manifest="${prefix}-ARTIFACTS.txt"
           test -f "$pkg" && test -f "$dmg" && test -f "$dsym" && test -f "$manifest"
-          pkgutil --expand "$pkg" "$RUNNER_TEMP/expanded-installer"
-          test -f "$RUNNER_TEMP/expanded-installer/Distribution"
+          expanded_installer="$RUNNER_TEMP/expanded-installer"
+          pkgutil --expand "$pkg" "$expanded_installer"
+          test -f "$expanded_installer/Distribution"
+          verify_component_install_policy() {
+            local package_info="$1"
+            local expected_location="$2"
+            local expected_bundle_id="$3"
+            local expected_bundle_path="$4"
+            test -f "$package_info"
+            test "$(xmllint --xpath 'string(/pkg-info/@install-location)' "$package_info")" = "$expected_location"
+            test "$(xmllint --xpath 'string(/pkg-info/@relocatable)' "$package_info")" = false
+            test "$(xmllint --xpath 'count(/pkg-info/relocate/*)' "$package_info")" = 0
+            test "$(xmllint --xpath 'count(/pkg-info/strict-identifier/bundle)' "$package_info")" = 1
+            test "$(xmllint --xpath 'string(/pkg-info/strict-identifier/bundle/@id)' "$package_info")" = "$expected_bundle_id"
+            test "$(xmllint --xpath 'count(/pkg-info/bundle)' "$package_info")" = 1
+            test "$(xmllint --xpath "count(/pkg-info/bundle[@path='./$expected_bundle_path' and @id='$expected_bundle_id'])" "$package_info")" = 1
+          }
+          verify_component_install_policy \
+            "$expanded_installer/DessMetal_APP.pkg/PackageInfo" \
+            /Applications com.AlexanderDess.app.DessMetal DessMetal.app
+          verify_component_install_policy \
+            "$expanded_installer/DessMetal_AU.pkg/PackageInfo" \
+            /Library/Audio/Plug-Ins/Components com.AlexanderDess.audiounit.DessMetal DessMetal.component
+          verify_component_install_policy \
+            "$expanded_installer/DessMetal_VST3.pkg/PackageInfo" \
+            /Library/Audio/Plug-Ins/VST3 com.AlexanderDess.vst3.DessMetal DessMetal.vst3
           hdiutil verify "$dmg"
           (
             cd "$out_dir"

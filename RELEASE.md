@@ -1,14 +1,37 @@
 # DessMetal macOS release guide
 
-## Local release candidate verified through 2026-07-28
+## Local validation and replacement release status through 2026-07-29
 
 The results below apply to the current 0.1.1 source and the exact locally staged bundles produced from it. Detailed
 UI/control evidence came from the exact AU in a view-only validation host; audio-device startup and real-host
 load/playback/save-reopen evidence came separately from the exact standalone and Logic Pro AU. No 0.1.0 result is
-substituted for an exact-current gate. A fresh Developer ID Application/Installer candidate was built from the clean
-source snapshot. The source is available in the private GitHub review repository; release-artifact upload and
-notarization remain separate operations. Their results and exact post-staple hashes must be recorded in the release
-verification manifest rather than inferred from this source file.
+substituted for an exact-current gate. The source is available in the private GitHub review repository, but the
+replacement installer must be committed, validated by exact-head CI, signed, installed, notarized, and recorded in
+the release verification manifest before it can replace the withdrawn candidate described below.
+
+### Withdrawn installer candidate
+
+The previously signed, notarized, and stapled 0.1.1 candidate was withdrawn on 2026-07-29 after a successful Installer
+run failed to place `DessMetal.app` in `/Applications`. `/var/log/install.log` showed that PackageKit relocated the app
+to a same-bundle-ID copy under the repository's generated staging tree. The AU and VST3 reached their intended system
+plug-in directories, but that does not make the distribution package acceptable. The prior candidate, its hashes,
+and its Apple result must not be reused as release evidence.
+
+The replacement packaging path explicitly disables component relocation. Before a replacement may be accepted,
+expand the final distribution package and verify all three component `PackageInfo` files:
+
+- APP: `@install-location=/Applications`, `@relocatable=false`, zero `relocate/bundle` entries, and one strict
+  identifier for `com.AlexanderDess.app.DessMetal`;
+- AU: `@install-location=/Library/Audio/Plug-Ins/Components`, `@relocatable=false`, zero `relocate/bundle` entries,
+  and one strict identifier for `com.AlexanderDess.audiounit.DessMetal`; and
+- VST3: `@install-location=/Library/Audio/Plug-Ins/VST3`, `@relocatable=false`, zero `relocate/bundle` entries, and
+  one strict identifier for `com.AlexanderDess.vst3.DessMetal`.
+
+The signed clean-install regression is deliberately adversarial: leave a same-bundle-ID DessMetal app copy outside
+`/Applications`, install the exact signed package, then prove that `/Applications/DessMetal.app` exists and that the
+new install-log interval contains no PackageKit relocation for any DessMetal payload. Replacement Developer ID
+signing, this install regression, notarization, stapling, and final artifact-hash recording are pending until their
+exact-current runs succeed.
 
 | Area | Status | Current evidence |
 | --- | --- | --- |
@@ -22,10 +45,10 @@ verification manifest rather than inferred from this source file.
 | Native UI | Pass | Exact 980 × 410 AU editor: all four amp tabs, all four drive choices, bypass/disabled states, gate, cabinet, EQ, and settings |
 | Standalone | Pass | Exact staged app launched through CoreAudio, remained responsive, and introduced no new HAL timeout after the audio-service reset |
 | Logic Pro 11.2.2 | Pass | Exact AU discovery, instantiation, native UI, finite/non-silent playback, active/bypass interaction, save/reopen persistence |
-| Unsigned package | Pass | Exact validation-only six-file PKG/DMG/checksum/manifest/dSYM set, payload/resource/license checks, and DMG integrity |
-| Developer ID package | Pass locally | Fresh exact-source APP/AU/VST3 and PKG/DMG set; Developer ID chains/timestamps, hardened runtime, exact payload identity, dSYM UUIDs, checksums, licenses, and mounted contents verified |
-| GitHub Actions | Configured | Validation runs on pushes, pull requests, and manual dispatch; require a green push/manual run on `main` for the exact release commit before signing |
-| Apple notarization and private review upload | Pending external operation | No external result is claimed here; verify the exact release manifest |
+| Unsigned package | Replacement rerun pending | The prior six-file validation set predates the non-relocatable component-policy correction |
+| Developer ID package | Prior candidate withdrawn; replacement pending | Rebuild from the clean replacement commit, then reverify signatures, payload identity, component policy, dSYMs, checksums, licenses, and mounted contents |
+| GitHub Actions | Prior source run exists; replacement exact-head run pending | Validation is configured for pushes, pull requests, and manual dispatch; require a green push/manual run on `main` for the exact replacement commit before signing |
+| Apple notarization and private review upload | Prior candidate withdrawn; replacement pending | Do not reuse the prior Apple result or artifact hashes; verify and record the exact replacement set |
 
 ## Compatibility and state
 
@@ -144,10 +167,10 @@ executes strict/stress AU checks plus the Steinberg validator's standard and ext
 assesses the exact inner PKG; a real privileged clean installation remains an external owner-machine gate.
 
 Publication remains a distinct manual GitHub action. The private review repository is
-`https://github.com/appdess/dessmetal`, and `origin/main` is the source-review branch. Workflow status is external and
-commit-specific: verify a successful live run for the exact release commit rather than relying on a statement in
-this file. GitLab validation imports no signing/notarization credentials, while its signed release job is manual and
-tag-only.
+`https://github.com/appdess/dessmetal`, and `origin/main` is the source-review branch. GitHub Actions has run for the
+prior source snapshot, but that evidence does not cover the uncommitted installer correction: verify a successful
+live run for the exact replacement commit rather than relying on an older result or a statement in this file. GitLab
+validation imports no signing/notarization credentials, while its signed release job is manual and tag-only.
 
 The local Xcode toolchain's AddressSanitizer runtime was independently reproduced hanging before `main()` even for a
 hello-world binary. The complete WAV corpus passed AddressSanitizer plus UndefinedBehaviorSanitizer with the installed
@@ -161,12 +184,15 @@ the only sanitizer coverage.
 2. Complete the owner's controlled listening decision, including the red-model ESR 0.01575 checkbox.
 3. Configure a working public support route and a private vulnerability-reporting route, then replace the currently
    unresolved plug-in/installer contact metadata before distribution.
-4. Review and explicitly approve the exact signed DMG SHA-256 before any Apple notarization submission.
-5. After notarization, validate the staple, Gatekeeper app/install assessment, and a clean-account or clean-machine
-   installation.
-6. Configure required reviewers on the GitHub `macos-release` environment, verify the exact-head validation run,
+4. Build the replacement signed package from its clean exact commit, expand every component `PackageInfo`, and prove
+   the fixed destinations, `@relocatable=false`, zero relocation entries, and exact strict bundle identifiers.
+5. Run the adversarial signed clean-install regression with a same-bundle-ID app copy outside `/Applications`; prove
+   `/Applications/DessMetal.app` exists afterward and the new `/var/log/install.log` interval records no relocation.
+6. Review and explicitly approve the replacement signed DMG SHA-256 before Apple notarization; afterward validate
+   the replacement staple, Gatekeeper app/install assessment, and repeat the clean-install check.
+7. Configure required reviewers on the GitHub `macos-release` environment, verify the exact-head validation run,
    review each dispatch input and transfer-confirmation phrase, then run the release workflow.
-7. Ask separately before creating a tag, preparing a draft, or publishing a release. A transfer-confirmation phrase
+8. Ask separately before creating a tag, preparing a draft, or publishing a release. A transfer-confirmation phrase
    authorizes only the named workflow artifact upload, not tag creation or publication.
 
 An unnotarized Developer ID candidate is for owner review, not a finished shareable macOS release.
@@ -180,11 +206,16 @@ An unnotarized Developer ID candidate is for owner review, not a finished sharea
    the binary changes.
 5. Run `./package_mac.sh`, approving Developer ID Keychain access only if macOS prompts.
 6. Verify `BUILD-INFO.txt`, identities, hardened runtime, certificate chains, trusted timestamps, PKG payload byte
-   identity, both-architecture dSYM UUIDs, exact six-file contents, checksums, and mounted DMG contents.
-7. Complete the asset and controlled-listening owner gates.
-8. Ask for approval of the exact signed DMG hash before submitting it to Apple.
-9. Run `DESSMETAL_NOTARY_PROFILE=existing-profile ./notarize_mac.sh <approved-dmg-sha256>`, then record the
-   post-staple DMG hash and repeat Gatekeeper and clean-install checks.
-10. Ask separately before uploading artifacts, creating a tag, preparing a draft, or publishing.
+   identity, both-architecture dSYM UUIDs, exact six-file contents, checksums, and mounted DMG contents. Expand the
+   three component packages and require the exact fixed destinations, `@relocatable=false`, zero `relocate/bundle`
+   entries, and exact strict bundle identifiers listed above.
+7. While a same-bundle-ID app copy exists outside `/Applications`, install the exact signed package and verify
+   `/Applications/DessMetal.app`, the two fixed system plug-in destinations, receipts, and the absence of PackageKit
+   relocation in the new `/var/log/install.log` interval.
+8. Complete the asset and controlled-listening owner gates.
+9. Ask for approval of the exact replacement signed DMG hash before submitting it to Apple.
+10. Run `DESSMETAL_NOTARY_PROFILE=existing-profile ./notarize_mac.sh <approved-dmg-sha256>`, then record the
+    replacement post-staple DMG hash and repeat Gatekeeper and the adversarial clean-install checks.
+11. Ask separately before uploading artifacts, creating a tag, preparing a draft, or publishing.
 
 No release script accepts legal terms, creates credentials, modifies a Developer account, or publishes a release.

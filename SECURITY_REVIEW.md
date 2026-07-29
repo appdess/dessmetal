@@ -1,6 +1,6 @@
 # DessMetal 0.1.x source security review
 
-Review updated through 2026-07-28. Scope: audio/model parsers, preset state, render-thread ownership, bundle entitlements,
+Review updated through 2026-07-29. Scope: audio/model parsers, preset state, render-thread ownership, bundle entitlements,
 packaging/signing scripts, and CI release boundaries. This is a source review plus targeted dynamic validation, not
 a formal penetration test.
 
@@ -48,6 +48,10 @@ a formal penetration test.
 - Packaging refuses to clean the generated release directory when the checkout, project, build, or release path is
   symlinked or resolves outside the expected checkout. Its retention self-test confirms the external target remains
   untouched when a symlinked build path is injected.
+- Packaging now builds each APP/AU/VST3 component from an analyzed root with relocation disabled, a strict bundle
+  identifier, version checking, and upgrade-only overwrite behavior. Packaging and notarization both fail closed
+  unless expanded `PackageInfo` records the exact destination, `@relocatable=false`, zero `relocate/bundle` entries,
+  and the expected strict identifier. Signed runtime verification of this correction remains pending below.
 
 ## Verification evidence
 
@@ -64,12 +68,12 @@ a formal penetration test.
 - A clean install of the exact staged AU passes strict `auval`, a 15-second stress render, and a real-AU 44.1 kHz
   offline regression that exercises default, amp-bypass, IR-bypass, and re-enable transitions with finite non-silent
   output and asserts the resampler's 27 samples of host-visible latency.
-- The exact current-source unsigned and Developer ID pkg/DMG pipelines pass their six-file, payload, resource,
-  license, checksum, manifest, dSYM, DMG-integrity, and mounted-content checks. The signed run verifies the exact
-  Application/Installer identities and team, certificate chains, hardened runtime, trusted timestamps, all three
-  payloads byte-for-byte against staged bundles, both-architecture dSYM UUIDs, the signed DMG, and its embedded PKG
-  bytes. Earlier signed candidates are quarantined as stale; any later source or packaged-document change requires a
-  fresh run.
+- The earlier exact-source unsigned and Developer ID pkg/DMG pipelines passed their six-file, payload, resource,
+  license, checksum, manifest, dSYM, DMG-integrity, signature, and mounted-content checks, but those checks did not
+  prevent PackageKit relocation. The signed, notarized, and stapled candidate was withdrawn after a successful
+  Installer run relocated `DessMetal.app` to a same-bundle-ID repository staging copy instead of
+  `/Applications`. Replacement unsigned/signed packaging and install validation are pending and must not inherit the
+  withdrawn candidate's result.
 - Steinberg's official VST3 3.8.0 validator passes the exact staged universal plug-in on both architectures (47/47
   standard and 537/537 extensive tests on each of arm64 and x86_64). An independent probe also enumerates all 21
   parameters, round-trips component state, and renders finite non-silent audio.
@@ -80,9 +84,9 @@ a formal penetration test.
 - After competing audio clients were stopped and CoreAudio restarted, the exact staged standalone launched normally,
   remained responsive, and introduced no new HAL property timeout. The earlier timeout was reproduced across
   old/current DessMetal, Logic, and multiple devices and is not attributed to current plug-in source.
-- Exact native UI and untouched Logic evidence captures, with SHA-256 hashes, are recorded in `RELEASE.md`. The
-  current Developer ID candidate matches the clean source snapshot. Apple-submission and post-staple status are
-  external release events and must be established from the exact artifact manifest, not inferred from this review.
+- Exact native UI and untouched Logic evidence captures, with SHA-256 hashes, are recorded in `RELEASE.md`. No
+  replacement Developer ID candidate, adversarial clean-install result, Apple submission, or post-staple result is
+  claimed for the installer correction; each must be established from the exact replacement artifact manifest.
 
 ## Residual limits and release gates
 
@@ -91,8 +95,8 @@ a formal penetration test.
 - The current product loads only its fixed bundled NAM allowlist. Arbitrary custom-NAM import must not be restored
   until JSON bytes/depth/dimensions, convolution groups, and expected weight counts are bounded and malformed model
   inputs are fuzzed.
-- A real macOS 15 GitHub Actions run remains useful independent CI coverage. The local workflows have only passed
-  static checks; no GitHub run is claimed.
+- GitHub Actions has run against the private remote for a prior source snapshot. That run does not cover the current
+  installer correction; a green push or manual run on `main` for the exact replacement commit remains required.
 - The owner has declared all NAM and IR captures first-party and approved their inclusion. Exact public
   redistribution/license terms remain blank in the owner-review sheet and are still a public-release gate. The owner
   also identified
@@ -103,12 +107,17 @@ a formal penetration test.
 - Capture-lineage claims are intentionally limited: DessBlock Green is the owner's Peavey 5150 green-channel
   capture; SickDess is the owner's Krank Revolution capture; DessTortion Blue/Red are current voicings in the
   historically EVH 5150 Stealth-based family but are not separately attributed to exact hardware variants.
-- Developer ID signing alone does not establish notarization. Treat a candidate as shareable only after its exact
-  Apple result, staple, Gatekeeper assessment, and clean-install checks are recorded.
-- The local GitHub workflows have passed static validation but have not run on GitHub; this checkout has no
-  configured remote. Ordinary CI imports no signing/notarization credentials; the separate release
-  workflow targets an environment that the repository owner must configure with required reviewers and requires
-  explicit sign, notarize, or verified-draft dispatch plus a separate operation-specific artifact-transfer phrase.
-  Publication is left as a separate manual GitHub action.
+- Developer ID signing alone does not establish a usable installer or notarization. Expand every replacement
+  component `PackageInfo` and require its fixed destination, `@relocatable=false`, zero `relocate/bundle` entries,
+  and exact strict identifier. Then install the exact signed package while a same-bundle-ID app copy exists outside
+  `/Applications`; require `/Applications/DessMetal.app` and no DessMetal relocation in the new install-log interval.
+  Only after that result may the exact replacement proceed to Apple, staple, Gatekeeper, and repeat clean-install
+  checks.
+- This checkout has a configured private GitHub `origin`, and GitHub validation has run for prior source. Exact-head
+  CI, signing, installation, notarization, and artifact upload for the replacement commit remain pending. Ordinary
+  CI imports no signing/notarization credentials; the separate release workflow targets an environment that the
+  repository owner must configure with required reviewers and requires explicit sign, notarize, or verified-draft
+  dispatch plus a separate operation-specific artifact-transfer phrase. Publication remains a separate manual
+  GitHub action.
 - Notarization, upload, tag creation, and publication require separate explicit approval. Post-notarization
   Gatekeeper assessment and a clean-account or clean-machine install test remain required.

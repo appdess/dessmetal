@@ -333,6 +333,29 @@ jobs:
           expanded_pkg="$RUNNER_TEMP/dessmetal-signed-installer-expanded"
           payload_root="$RUNNER_TEMP/dessmetal-signed-payloads"
           pkgutil --expand "$pkg" "$expanded_pkg"
+          verify_component_install_policy() {
+            local package_info="$1"
+            local expected_location="$2"
+            local expected_bundle_id="$3"
+            local expected_bundle_path="$4"
+            test -f "$package_info"
+            test "$(xmllint --xpath 'string(/pkg-info/@install-location)' "$package_info")" = "$expected_location"
+            test "$(xmllint --xpath 'string(/pkg-info/@relocatable)' "$package_info")" = false
+            test "$(xmllint --xpath 'count(/pkg-info/relocate/*)' "$package_info")" = 0
+            test "$(xmllint --xpath 'count(/pkg-info/strict-identifier/bundle)' "$package_info")" = 1
+            test "$(xmllint --xpath 'string(/pkg-info/strict-identifier/bundle/@id)' "$package_info")" = "$expected_bundle_id"
+            test "$(xmllint --xpath 'count(/pkg-info/bundle)' "$package_info")" = 1
+            test "$(xmllint --xpath "count(/pkg-info/bundle[@path='./$expected_bundle_path' and @id='$expected_bundle_id'])" "$package_info")" = 1
+          }
+          verify_component_install_policy \
+            "$expanded_pkg/DessMetal_APP.pkg/PackageInfo" \
+            /Applications com.AlexanderDess.app.DessMetal DessMetal.app
+          verify_component_install_policy \
+            "$expanded_pkg/DessMetal_AU.pkg/PackageInfo" \
+            /Library/Audio/Plug-Ins/Components com.AlexanderDess.audiounit.DessMetal DessMetal.component
+          verify_component_install_policy \
+            "$expanded_pkg/DessMetal_VST3.pkg/PackageInfo" \
+            /Library/Audio/Plug-Ins/VST3 com.AlexanderDess.vst3.DessMetal DessMetal.vst3
           mkdir -p "$payload_root"
           extract_component() {
             local component="$1"

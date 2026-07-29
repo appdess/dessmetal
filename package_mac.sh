@@ -531,6 +531,73 @@ require_file()
   [[ -e "$1" ]] || { echo "Missing required artifact: $1" >&2; exit 1; }
 }
 
+prepare_nonrelocatable_component_plist()
+{
+  local component_root="$1"
+  local expected_bundle="$2"
+  local component_plist="$3"
+  local actual_root_entries
+
+  actual_root_entries="$(find "$component_root" -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort)"
+  [[ "$actual_root_entries" == "$expected_bundle" ]] || {
+    echo "Component root must contain only $expected_bundle: $component_root" >&2
+    printf '%s\n' "$actual_root_entries" >&2
+    exit 1
+  }
+
+  pkgbuild --analyze --root "$component_root" "$component_plist"
+  [[ "$(plutil -extract '0.RootRelativeBundlePath' raw -o - "$component_plist")" == "$expected_bundle" ]] || {
+    echo "pkgbuild analyzed an unexpected bundle in $component_root" >&2
+    exit 1
+  }
+  plutil -replace '0.BundleIsRelocatable' -bool NO "$component_plist"
+  plutil -replace '0.BundleHasStrictIdentifier' -bool YES "$component_plist"
+  plutil -replace '0.BundleIsVersionChecked' -bool YES "$component_plist"
+  plutil -replace '0.BundleOverwriteAction' -string upgrade "$component_plist"
+  [[ "$(plutil -extract '0.BundleIsRelocatable' raw -o - "$component_plist")" == "false" ]] || {
+    echo "Could not disable package relocation for $expected_bundle" >&2
+    exit 1
+  }
+}
+
+verify_component_install_policy()
+{
+  local package_info="$1"
+  local expected_location="$2"
+  local expected_bundle_id="$3"
+  local expected_bundle_path="$4"
+
+  require_file "$package_info"
+  [[ "$(xmllint --xpath 'string(/pkg-info/@install-location)' "$package_info")" == "$expected_location" ]] || {
+    echo "Unexpected component install location: $package_info" >&2
+    exit 1
+  }
+  [[ "$(xmllint --xpath 'string(/pkg-info/@relocatable)' "$package_info")" == "false" ]] || {
+    echo "Release component does not explicitly disable relocation: $package_info" >&2
+    exit 1
+  }
+  [[ "$(xmllint --xpath 'count(/pkg-info/relocate/*)' "$package_info")" == "0" ]] || {
+    echo "Release component is relocatable and could install outside its fixed destination: $package_info" >&2
+    exit 1
+  }
+  [[ "$(xmllint --xpath 'count(/pkg-info/strict-identifier/bundle)' "$package_info")" == "1" ]] || {
+    echo "Release component must contain exactly one strict bundle identifier: $package_info" >&2
+    exit 1
+  }
+  [[ "$(xmllint --xpath "count(/pkg-info/strict-identifier/bundle[@id='$expected_bundle_id'])" "$package_info")" == "1" ]] || {
+    echo "Release component is missing strict bundle-identifier enforcement: $package_info" >&2
+    exit 1
+  }
+  [[ "$(xmllint --xpath "count(/pkg-info/bundle[@path='./$expected_bundle_path' and @id='$expected_bundle_id'])" "$package_info")" == "1" ]] || {
+    echo "Release component has an unexpected primary bundle path or identifier: $package_info" >&2
+    exit 1
+  }
+  [[ "$(xmllint --xpath 'count(/pkg-info/bundle)' "$package_info")" == "1" ]] || {
+    echo "Release component must describe exactly one primary bundle: $package_info" >&2
+    exit 1
+  }
+}
+
 require_universal_binary()
 {
   local binary="$1"
@@ -856,13 +923,26 @@ for bundle in "$app" "$au" "$vst3"; do
   fi
 done
 
-pkgbuild --component "$app" --install-location /Applications \
+app_component_plist="$release_root/DessMetal_APP-components.plist"
+au_component_plist="$release_root/DessMetal_AU-components.plist"
+vst3_component_plist="$release_root/DessMetal_VST3-components.plist"
+prepare_nonrelocatable_component_plist \
+  "$products_root/Applications" DessMetal.app "$app_component_plist"
+prepare_nonrelocatable_component_plist \
+  "$products_root/Components" DessMetal.component "$au_component_plist"
+prepare_nonrelocatable_component_plist \
+  "$products_root/VST3" DessMetal.vst3 "$vst3_component_plist"
+
+pkgbuild --root "$products_root/Applications" --install-location /Applications \
+  --component-plist "$app_component_plist" \
   --identifier com.AlexanderDess.pkg.DessMetal.app --version "$version" \
   "$packages_root/DessMetal_APP.pkg"
-pkgbuild --component "$au" --install-location /Library/Audio/Plug-Ins/Components \
+pkgbuild --root "$products_root/Components" --install-location /Library/Audio/Plug-Ins/Components \
+  --component-plist "$au_component_plist" \
   --identifier com.AlexanderDess.pkg.DessMetal.au --version "$version" \
   "$packages_root/DessMetal_AU.pkg"
-pkgbuild --component "$vst3" --install-location /Library/Audio/Plug-Ins/VST3 \
+pkgbuild --root "$products_root/VST3" --install-location /Library/Audio/Plug-Ins/VST3 \
+  --component-plist "$vst3_component_plist" \
   --identifier com.AlexanderDess.pkg.DessMetal.vst3 --version "$version" \
   "$packages_root/DessMetal_VST3.pkg"
 
@@ -886,6 +966,15 @@ expanded_installer="$release_root/expanded-installer"
 payload_root="$release_root/verified-payloads"
 pkgutil --expand "$pkg" "$expanded_installer"
 require_file "$expanded_installer/Distribution"
+verify_component_install_policy \
+  "$expanded_installer/DessMetal_APP.pkg/PackageInfo" \
+  /Applications com.AlexanderDess.app.DessMetal DessMetal.app
+verify_component_install_policy \
+  "$expanded_installer/DessMetal_AU.pkg/PackageInfo" \
+  /Library/Audio/Plug-Ins/Components com.AlexanderDess.audiounit.DessMetal DessMetal.component
+verify_component_install_policy \
+  "$expanded_installer/DessMetal_VST3.pkg/PackageInfo" \
+  /Library/Audio/Plug-Ins/VST3 com.AlexanderDess.vst3.DessMetal DessMetal.vst3
 mkdir -p "$payload_root/app" "$payload_root/au" "$payload_root/vst3"
 gzip -dc "$expanded_installer/DessMetal_APP.pkg/Payload" | \
   (cd "$payload_root/app" && cpio -idm --quiet)

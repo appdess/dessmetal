@@ -33,6 +33,10 @@ release-status claims, and AI/process narration in RELEASE.md or generated relea
 - Validate the exact current-source universal APP, AU, and VST3, not an older installed copy or a previous package.
 - Run the source/core, WAV parser, and state-layout suites before packaging. Run strict `auval`, AU stress/offline
   rendering, and the official VST3 validator against the freshly staged binaries when release freshness changes.
+- Before accepting a signed installer, expand all three component packages and require their exact fixed destinations,
+  `@relocatable=false`, zero `relocate/bundle` entries, and exact strict bundle identifiers, then install adversarially
+  with a same-bundle-ID app copy elsewhere and confirm the app lands in `/Applications` with no relocation in
+  `/var/log/install.log`.
 - A view-only AU UI host proves layout and parameter interaction only. It does not prove standalone CoreAudio startup,
   real-time playback, Logic Pro discovery, save/reopen persistence, or audible behavior.
 - For Logic validation, first make a recoverable backup of any installed component, install the exact staged AU into

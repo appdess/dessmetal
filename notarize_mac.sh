@@ -229,6 +229,47 @@ verify_developer_installer_signature()
   }
 }
 
+verify_component_install_policy()
+{
+  local package_info="$1"
+  local expected_location="$2"
+  local expected_bundle_id="$3"
+  local expected_bundle_path="$4"
+
+  [[ -f "$package_info" ]] || {
+    echo "Installer component is missing PackageInfo: $package_info" >&2
+    return 1
+  }
+  [[ "$(xmllint --xpath 'string(/pkg-info/@install-location)' "$package_info")" == "$expected_location" ]] || {
+    echo "Unexpected component install location: $package_info" >&2
+    return 1
+  }
+  [[ "$(xmllint --xpath 'string(/pkg-info/@relocatable)' "$package_info")" == "false" ]] || {
+    echo "Installer component does not explicitly disable relocation: $package_info" >&2
+    return 1
+  }
+  [[ "$(xmllint --xpath 'count(/pkg-info/relocate/*)' "$package_info")" == "0" ]] || {
+    echo "Installer component is relocatable and could install outside its fixed destination: $package_info" >&2
+    return 1
+  }
+  [[ "$(xmllint --xpath 'count(/pkg-info/strict-identifier/bundle)' "$package_info")" == "1" ]] || {
+    echo "Installer component must contain exactly one strict bundle identifier: $package_info" >&2
+    return 1
+  }
+  [[ "$(xmllint --xpath "count(/pkg-info/strict-identifier/bundle[@id='$expected_bundle_id'])" "$package_info")" == "1" ]] || {
+    echo "Installer component is missing strict bundle-identifier enforcement: $package_info" >&2
+    return 1
+  }
+  [[ "$(xmllint --xpath "count(/pkg-info/bundle[@path='./$expected_bundle_path' and @id='$expected_bundle_id'])" "$package_info")" == "1" ]] || {
+    echo "Installer component has an unexpected primary bundle path or identifier: $package_info" >&2
+    return 1
+  }
+  [[ "$(xmllint --xpath 'count(/pkg-info/bundle)' "$package_info")" == "1" ]] || {
+    echo "Installer component must describe exactly one primary bundle: $package_info" >&2
+    return 1
+  }
+}
+
 verify_installer_payloads()
 {
   local installer="$1"
@@ -248,6 +289,15 @@ verify_installer_payloads()
     echo "Expanded installer is missing its Distribution file" >&2
     return 1
   }
+  verify_component_install_policy \
+    "$expanded/DessMetal_APP.pkg/PackageInfo" \
+    /Applications com.AlexanderDess.app.DessMetal DessMetal.app || return 1
+  verify_component_install_policy \
+    "$expanded/DessMetal_AU.pkg/PackageInfo" \
+    /Library/Audio/Plug-Ins/Components com.AlexanderDess.audiounit.DessMetal DessMetal.component || return 1
+  verify_component_install_policy \
+    "$expanded/DessMetal_VST3.pkg/PackageInfo" \
+    /Library/Audio/Plug-Ins/VST3 com.AlexanderDess.vst3.DessMetal DessMetal.vst3 || return 1
 
   expected_components="$(printf '%s\n' DessMetal_APP.pkg DessMetal_AU.pkg DessMetal_VST3.pkg | LC_ALL=C sort)"
   actual_components="$(find "$expanded" -mindepth 1 -maxdepth 1 -type d -name '*.pkg' \
