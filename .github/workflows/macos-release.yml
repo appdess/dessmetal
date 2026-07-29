@@ -32,6 +32,10 @@ on:
         description: Successful trusted macOS validation run ID for source_commit; required only for sign
         required: false
         type: string
+      codex_security_run_id:
+        description: Successful deep Codex Security run ID for source_commit; required only for sign
+        required: false
+        type: string
       source_artifact_run_id:
         description: Prior sign/notarize run ID; leave blank only for sign
         required: false
@@ -70,6 +74,8 @@ jobs:
       version: ${{ steps.verify.outputs.version }}
       commit: ${{ steps.verify.outputs.commit }}
       ci_run_id: ${{ steps.verify.outputs.ci_run_id }}
+      codex_security_run_id: ${{ steps.verify_security.outputs.run_id }}
+      codex_security_attestation_sha256: ${{ steps.verify_security.outputs.attestation_sha256 }}
       signed_artifact: ${{ steps.verify.outputs.signed_artifact }}
       notarized_artifact: ${{ steps.verify.outputs.notarized_artifact }}
     steps:
@@ -90,6 +96,7 @@ jobs:
           SOURCE_COMMIT: ${{ inputs.source_commit }}
           APPROVED_SOURCE_HASH: ${{ inputs.approved_source_archive_sha256 }}
           CI_RUN_ID: ${{ inputs.ci_run_id }}
+          CODEX_SECURITY_RUN_ID: ${{ inputs.codex_security_run_id }}
           SOURCE_RUN_ID: ${{ inputs.source_artifact_run_id }}
           APPROVED_DMG_HASH: ${{ inputs.approved_dmg_sha256 }}
           ENVIRONMENT_CONFIRMATION: ${{ inputs.protected_environment_confirmation }}
@@ -99,6 +106,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$SOURCE_COMMIT"
           test "$ENVIRONMENT_CONFIRMATION" = macos-release
           [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           test "$RELEASE_TAG" = "v$RELEASE_VERSION"
@@ -130,6 +138,7 @@ jobs:
 
           if [[ "$OPERATION" == sign ]]; then
             [[ "$CI_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+            [[ "$CODEX_SECURITY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
             ci_run_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN_ID")"
             jq -e \
               --arg repository "$GITHUB_REPOSITORY" \
@@ -143,6 +152,7 @@ jobs:
                .head_repository.full_name == $repository' <<< "$ci_run_json" >/dev/null
           else
             test -z "$CI_RUN_ID"
+            test -z "$CODEX_SECURITY_RUN_ID"
           fi
 
           if [[ "$OPERATION" == notarize || "$OPERATION" == draft ]]; then
@@ -175,7 +185,116 @@ jobs:
             echo "- Approved source archive SHA-256: \`$source_hash\`"
             if [[ "$OPERATION" == sign ]]; then
               echo "- Successful trusted macOS validation run: \`$CI_RUN_ID\`"
+              echo "- Successful deep Codex Security run: \`$CODEX_SECURITY_RUN_ID\`"
             fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify the exact successful deep Codex Security run
+        if: inputs.operation == 'sign'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_SECURITY_RUN_ID: ${{ inputs.codex_security_run_id }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -Eeuo pipefail
+          run_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$CODEX_SECURITY_RUN_ID")"
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg source_commit "$SOURCE_COMMIT" \
+            '(.path == ".github/workflows/codex-security.yml" or
+               (.path | startswith(".github/workflows/codex-security.yml@"))) and
+             .name == "Codex Security release scan" and
+             .event == "workflow_dispatch" and
+             .status == "completed" and .conclusion == "success" and
+             .head_sha == $source_commit and .head_branch == "main" and
+             .head_repository.full_name == $repository' <<< "$run_json" >/dev/null
+
+      # v4.3.0, resolved from the official actions/download-artifact repository.
+      - name: Download the exact sanitized Codex Security attestation
+        if: inputs.operation == 'sign'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: dessmetal-codex-security-attestation-${{ inputs.source_commit }}
+          path: ${{ runner.temp }}/dessmetal-codex-security-attestation
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.codex_security_run_id }}
+
+      - name: Fail unless the deep-scan attestation is exact and complete
+        if: inputs.operation == 'sign'
+        id: verify_security
+        env:
+          CODEX_SECURITY_RUN_ID: ${{ inputs.codex_security_run_id }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          APPROVED_SOURCE_HASH: ${{ inputs.approved_source_archive_sha256 }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -Eeuo pipefail
+          attestation_root="$RUNNER_TEMP/dessmetal-codex-security-attestation"
+          attestation="$attestation_root/attestation.json"
+          checksum="$attestation_root/attestation.json.sha256"
+          expected_files="$(printf '%s\n' attestation.json attestation.json.sha256 | sort)"
+          actual_files="$(find "$attestation_root" -maxdepth 1 -type f -exec basename {} \; | sort)"
+          test "$actual_files" = "$expected_files"
+          test "$(wc -l < "$checksum" | tr -d ' ')" = 1
+          [[ "$(< "$checksum")" =~ ^[0-9a-f]{64}\ \ attestation\.json$ ]]
+          (cd "$attestation_root" && shasum -a 256 -c attestation.json.sha256)
+          attestation_hash="$(shasum -a 256 "$attestation" | awk '{print $1}')"
+
+          jq -e \
+            --argjson run_id "$CODEX_SECURITY_RUN_ID" \
+            --arg source_commit "$SOURCE_COMMIT" \
+            --arg source_hash "$APPROVED_SOURCE_HASH" \
+            --arg release_tag "$RELEASE_TAG" \
+            'keys == [
+               "blocking_findings", "codex_auth_helper_invocations", "codex_auth_helper_refresh_gap_ms",
+               "codex_auth_helper_refresh_interval_ms", "codex_auth_helper_refresh_proven", "coverage",
+               "event", "model", "policy_threshold", "reasoning_effort", "release_tag", "repository",
+               "result", "scan_mode", "scanner_lock_sha256", "scanner_package",
+               "scanner_package_sha256", "schema",
+               "sealed_artifact_sha256", "source_archive_sha256", "source_commit", "target",
+               "total_findings", "wif_provider_id", "wif_service_account_id", "workflow",
+               "workflow_run_id", "workflow_sha"
+             ] and
+             .schema == "dessmetal.codex-security-attestation.v1" and
+             .repository == "appdess/dessmetal" and
+             .workflow == ".github/workflows/codex-security.yml" and
+             .workflow_run_id == $run_id and
+             .workflow_sha == $source_commit and
+             .event == "workflow_dispatch" and
+             .result == "pass" and
+             .scan_mode == "deep" and .target == "repository" and
+             .source_commit == $source_commit and
+             .source_archive_sha256 == $source_hash and
+             .release_tag == $release_tag and
+             .coverage == "complete" and
+             .policy_threshold == "high" and
+             .blocking_findings == 0 and
+             (.total_findings | type == "number" and . >= 0 and floor == .) and
+             .model == "gpt-5.6-sol" and .reasoning_effort == "xhigh" and
+             .scanner_package == "@openai/codex-security@0.1.1" and
+             .scanner_package_sha256 == "ee8106dcf241fa6a630cad5c74a228aec49c391a09e99d87a9947a53fd630800" and
+             .scanner_lock_sha256 == "3aee5c0d074b70e5ee79976a67ceaab724072dfa04e7ecd5b8d1c1fc38ec7e05" and
+             .wif_provider_id == "idp_qogpN1ZpwDCu3NroaZ6OjeH4" and
+             .wif_service_account_id == "user-LB72xJXEqSaonyw7fADmZ9Mk" and
+             (.codex_auth_helper_invocations | type == "number" and . >= 2 and floor == .) and
+             .codex_auth_helper_refresh_interval_ms == 120000 and
+             (.codex_auth_helper_refresh_gap_ms | type == "number" and . >= 119900 and floor == .) and
+             .codex_auth_helper_refresh_proven == true and
+             (.sealed_artifact_sha256 | keys == ["coverage.json", "findings.json", "scan-manifest.json"]) and
+             (all(.sealed_artifact_sha256[]; test("^[0-9a-f]{64}$")))' \
+            "$attestation" >/dev/null
+          {
+            printf 'run_id=%s\n' "$CODEX_SECURITY_RUN_ID"
+            printf 'attestation_sha256=%s\n' "$attestation_hash"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo
+            echo '### Deep Codex Security attestation verified'
+            echo
+            echo "- Run: \`$CODEX_SECURITY_RUN_ID\`"
+            echo "- Attestation SHA-256: \`$attestation_hash\`"
+            echo '- Exact source commit, archive hash, tag, complete coverage, and no high/critical findings matched.'
           } >> "$GITHUB_STEP_SUMMARY"
 
   sign:
@@ -207,6 +326,7 @@ jobs:
           APPROVED_SOURCE_HASH: ${{ inputs.approved_source_archive_sha256 }}
         run: |
           set -Eeuo pipefail
+          test "$GITHUB_SHA" = "$SOURCE_COMMIT"
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
           test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$SOURCE_COMMIT"
           test "$(awk -F '"' '/^#define PLUG_VERSION_STR / { print $2; exit }' NeuralAmpModeler/config.h)" = "$RELEASE_VERSION"
@@ -428,7 +548,7 @@ jobs:
           dmg_hash="$(shasum -a 256 "$dmg" | awk '{print $1}')"
           provenance="$out/${prefix}-SIGN-PROVENANCE.txt"
           {
-            echo 'format=dessmetal-release-provenance-v2'
+            echo 'format=dessmetal-release-provenance-v3'
             echo "workflow_sha=$GITHUB_SHA"
             echo "run_id=$GITHUB_RUN_ID"
             echo 'operation=sign'
@@ -437,6 +557,8 @@ jobs:
             echo "source_commit=${{ needs.gate.outputs.commit }}"
             echo "source_archive_sha256=${{ inputs.approved_source_archive_sha256 }}"
             echo "ci_run_id=${{ needs.gate.outputs.ci_run_id }}"
+            echo "codex_security_run_id=${{ needs.gate.outputs.codex_security_run_id }}"
+            echo "codex_security_attestation_sha256=${{ needs.gate.outputs.codex_security_attestation_sha256 }}"
             echo "dmg_sha256=$dmg_hash"
           } > "$provenance"
           {
@@ -444,6 +566,7 @@ jobs:
             echo
             echo "- Candidate artifact: \`${{ needs.gate.outputs.signed_artifact }}\`"
             echo "- Bound macOS validation run: \`${{ needs.gate.outputs.ci_run_id }}\`"
+            echo "- Bound deep Codex Security run: \`${{ needs.gate.outputs.codex_security_run_id }}\`"
             echo "- Signed DMG SHA-256 requiring separate approval: \`$dmg_hash\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -487,6 +610,7 @@ jobs:
           APPROVED_SOURCE_HASH: ${{ inputs.approved_source_archive_sha256 }}
         run: |
           set -Eeuo pipefail
+          test "$GITHUB_SHA" = "$SOURCE_COMMIT"
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
           test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$SOURCE_COMMIT"
           test "$(awk -F '"' '/^#define PLUG_VERSION_STR / { print $2; exit }' NeuralAmpModeler/config.h)" = "$RELEASE_VERSION"
@@ -503,10 +627,12 @@ jobs:
           run_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID")"
           jq -e \
             --arg workflow_sha "$CURRENT_WORKFLOW_SHA" \
+            --arg repository "$GITHUB_REPOSITORY" \
             '(.path == ".github/workflows/macos-release.yml" or
               (.path | startswith(".github/workflows/macos-release.yml@"))) and
              .event == "workflow_dispatch" and .conclusion == "success" and
-             .head_sha == $workflow_sha' <<< "$run_json" >/dev/null
+             .head_sha == $workflow_sha and .head_branch == "main" and
+             .head_repository.full_name == $repository' <<< "$run_json" >/dev/null
 
       # v4.3.0, resolved from the official actions/download-artifact repository.
       - name: Download the exact prior signed candidate
@@ -542,11 +668,15 @@ jobs:
           codesign --verify --verbose=2 "$dmg"
           hdiutil verify "$dmg"
           unzip -tq "$dsym"
-          test "$(wc -l < "$provenance" | tr -d ' ')" = 10
+          test "$(wc -l < "$provenance" | tr -d ' ')" = 12
           ci_run_id="$(awk -F= '$1 == "ci_run_id" { print $2 }' "$provenance")"
+          codex_security_run_id="$(awk -F= '$1 == "codex_security_run_id" { print $2 }' "$provenance")"
+          codex_security_attestation_sha256="$(awk -F= '$1 == "codex_security_attestation_sha256" { print $2 }' "$provenance")"
           [[ "$ci_run_id" =~ ^[1-9][0-9]*$ ]]
+          [[ "$codex_security_run_id" =~ ^[1-9][0-9]*$ ]]
+          [[ "$codex_security_attestation_sha256" =~ ^[0-9a-f]{64}$ ]]
           for line in \
-            'format=dessmetal-release-provenance-v2' \
+            'format=dessmetal-release-provenance-v3' \
             "workflow_sha=$GITHUB_SHA" \
             "run_id=${{ inputs.source_artifact_run_id }}" \
             'operation=sign' \
@@ -555,10 +685,16 @@ jobs:
             "source_commit=${{ needs.gate.outputs.commit }}" \
             "source_archive_sha256=${{ inputs.approved_source_archive_sha256 }}" \
             "ci_run_id=$ci_run_id" \
+            "codex_security_run_id=$codex_security_run_id" \
+            "codex_security_attestation_sha256=$codex_security_attestation_sha256" \
             "dmg_sha256=$APPROVED_DMG_HASH"; do
             grep -Fqx "$line" "$provenance"
           done
-          printf 'ci_run_id=%s\n' "$ci_run_id" >> "$GITHUB_OUTPUT"
+          {
+            printf 'ci_run_id=%s\n' "$ci_run_id"
+            printf 'codex_security_run_id=%s\n' "$codex_security_run_id"
+            printf 'codex_security_attestation_sha256=%s\n' "$codex_security_attestation_sha256"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Store App Store Connect credentials in a temporary keychain
         id: notary_keychain
@@ -650,7 +786,7 @@ jobs:
           dmg_hash="$(shasum -a 256 "$dmg" | awk '{print $1}')"
           provenance="$out/${prefix}-NOTARIZE-PROVENANCE.txt"
           {
-            echo 'format=dessmetal-release-provenance-v2'
+            echo 'format=dessmetal-release-provenance-v3'
             echo "workflow_sha=$GITHUB_SHA"
             echo "run_id=$GITHUB_RUN_ID"
             echo 'operation=notarize'
@@ -659,6 +795,8 @@ jobs:
             echo "source_commit=${{ needs.gate.outputs.commit }}"
             echo "source_archive_sha256=${{ inputs.approved_source_archive_sha256 }}"
             echo "validation_ci_run_id=${{ steps.verify_signed.outputs.ci_run_id }}"
+            echo "codex_security_run_id=${{ steps.verify_signed.outputs.codex_security_run_id }}"
+            echo "codex_security_attestation_sha256=${{ steps.verify_signed.outputs.codex_security_attestation_sha256 }}"
             echo "source_artifact_run_id=${{ inputs.source_artifact_run_id }}"
             echo "approved_signed_dmg_sha256=${{ inputs.approved_dmg_sha256 }}"
             echo "notarized_dmg_sha256=$dmg_hash"
@@ -710,6 +848,7 @@ jobs:
           APPROVED_SOURCE_HASH: ${{ inputs.approved_source_archive_sha256 }}
         run: |
           set -Eeuo pipefail
+          test "$GITHUB_SHA" = "$SOURCE_COMMIT"
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
           test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$SOURCE_COMMIT"
           test "$(awk -F '"' '/^#define PLUG_VERSION_STR / { print $2; exit }' NeuralAmpModeler/config.h)" = "$RELEASE_VERSION"
@@ -726,10 +865,12 @@ jobs:
           run_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID")"
           jq -e \
             --arg workflow_sha "$CURRENT_WORKFLOW_SHA" \
+            --arg repository "$GITHUB_REPOSITORY" \
             '(.path == ".github/workflows/macos-release.yml" or
               (.path | startswith(".github/workflows/macos-release.yml@"))) and
              .event == "workflow_dispatch" and .conclusion == "success" and
-             .head_sha == $workflow_sha' <<< "$run_json" >/dev/null
+             .head_sha == $workflow_sha and .head_branch == "main" and
+             .head_repository.full_name == $repository' <<< "$run_json" >/dev/null
 
       # v4.3.0, resolved from the official actions/download-artifact repository.
       - name: Download the exact prior notarized candidate
@@ -769,9 +910,9 @@ jobs:
           spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
           spctl --assess --type install --verbose=2 "$pkg"
           unzip -tq "$dsym"
-          test "$(wc -l < "$sign_provenance" | tr -d ' ')" = 10
+          test "$(wc -l < "$sign_provenance" | tr -d ' ')" = 12
           for line in \
-            'format=dessmetal-release-provenance-v2' \
+            'format=dessmetal-release-provenance-v3' \
             "workflow_sha=$GITHUB_SHA" \
             'operation=sign' \
             "release_tag=${{ inputs.release_tag }}" \
@@ -781,15 +922,19 @@ jobs:
             grep -Fqx "$line" "$sign_provenance"
           done
           ci_run_id="$(awk -F= '$1 == "ci_run_id" { print $2 }' "$sign_provenance")"
+          codex_security_run_id="$(awk -F= '$1 == "codex_security_run_id" { print $2 }' "$sign_provenance")"
+          codex_security_attestation_sha256="$(awk -F= '$1 == "codex_security_attestation_sha256" { print $2 }' "$sign_provenance")"
           [[ "$ci_run_id" =~ ^[1-9][0-9]*$ ]]
+          [[ "$codex_security_run_id" =~ ^[1-9][0-9]*$ ]]
+          [[ "$codex_security_attestation_sha256" =~ ^[0-9a-f]{64}$ ]]
           signed_dmg_hash="$(awk -F= '$1 == "dmg_sha256" { print $2 }' "$sign_provenance")"
           [[ "$signed_dmg_hash" =~ ^[0-9a-f]{64}$ ]]
           sign_run_id="$(awk -F= '$1 == "source_artifact_run_id" { print $2 }' "$notary_provenance")"
           [[ "$sign_run_id" =~ ^[1-9][0-9]*$ ]]
           grep -Fqx "run_id=$sign_run_id" "$sign_provenance"
-          test "$(wc -l < "$notary_provenance" | tr -d ' ')" = 12
+          test "$(wc -l < "$notary_provenance" | tr -d ' ')" = 14
           for line in \
-            'format=dessmetal-release-provenance-v2' \
+            'format=dessmetal-release-provenance-v3' \
             "workflow_sha=$GITHUB_SHA" \
             "run_id=${{ inputs.source_artifact_run_id }}" \
             'operation=notarize' \
@@ -798,6 +943,8 @@ jobs:
             "source_commit=${{ needs.gate.outputs.commit }}" \
             "source_archive_sha256=${{ inputs.approved_source_archive_sha256 }}" \
             "validation_ci_run_id=$ci_run_id" \
+            "codex_security_run_id=$codex_security_run_id" \
+            "codex_security_attestation_sha256=$codex_security_attestation_sha256" \
             "approved_signed_dmg_sha256=$signed_dmg_hash" \
             "notarized_dmg_sha256=$APPROVED_DMG_HASH"; do
             grep -Fqx "$line" "$notary_provenance"

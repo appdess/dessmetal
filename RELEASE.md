@@ -152,24 +152,66 @@ are descriptive only; trademarks belong to their respective owners, and no affil
 The local GitHub workflows implement:
 
 - pull-request, main, and manual validation that imports no signing/notarization credentials;
+- a protected manual Codex Security scan that uses GitHub OIDC and OpenAI workload identity federation instead of a
+  stored OpenAI API key;
 - a manually dispatched Developer ID signing operation;
 - a separately approved notarization operation that reuses an exact prior signed candidate; and
 - preparation of a verified draft from an exact approved notarized run.
 
-Ordinary CI retains no product artifacts. The release jobs target a `macos-release` environment that the repository
-owner must configure with required reviewers; workflow text cannot prove that repository setting. Each dispatch must
-also type the exact transfer authorization for its existing tag:
+Ordinary CI retains no product artifacts. The release jobs target a main-only `macos-release` environment with a
+required owner review. That repository setting was verified on 2026-07-29 but remains mutable external state. Each
+dispatch must also type the exact transfer authorization for its existing tag:
 
 - `UPLOAD SIGNED CANDIDATE vMAJOR.MINOR.PATCH`
 - `UPLOAD NOTARIZED CANDIDATE vMAJOR.MINOR.PATCH`
 - `UPLOAD DRAFT ASSETS vMAJOR.MINOR.PATCH`
 
-The protected environment supplies these secrets only to the matching release job:
+The `codex-security-release` environment is a separate, main-only trust boundary. It has a required owner review and
+contains only non-secret configuration variables: the OpenAI WIF audience, identity-provider ID, service-account ID,
+the exact `@openai/codex-security@0.1.1` package coordinate, its approved npm tarball SHA-256, and the approved
+committed npm lockfile SHA-256. The lockfile resolves the complete 93-entry package graph with registry URLs and
+SHA-512 integrity values; CI verifies the top-level tarball against both hashes and installs the graph with
+`npm ci --ignore-scripts`; npm lifecycle scripts are also disabled while fetching the top-level tarball. The
+workflow pins Node.js 22.23.1 with npm 10.9.8. The environment contains no GitHub Actions secret. The corresponding
+OpenAI mapping is restricted to `appdess/dessmetal`, `refs/heads/main`, the
+exact `.github/workflows/codex-security.yml` path, `workflow_dispatch`, and the `codex-security-release` environment;
+the service account can only read model metadata and make model requests.
+
+The scan exchanges GitHub's signed job identity for a short-lived OpenAI token, verifies the expected OIDC claims,
+and gives each token only to Codex's guarded provider-auth process. The scanner's mandatory API-key login bootstrap
+receives a fixed non-secret marker, never the WIF token; `CODEX_HOME` and credential-bearing environment names are
+excluded from model tool processes, and the helper refuses callers whose direct parent is not the pinned Codex
+native binary at its exact locked-package path. Before any repository checkout, the workflow also runs the pinned
+Codex sandbox directly and fails unless
+the host PID namespace, GitHub identity environment, `CODEX_HOME`, and direct network are unavailable inside the
+sandbox. A host-owned command helper refreshes the token during longer scans. Raw tokens and raw scanner output remain
+ephemeral in named runner-temporary paths, including the scanner state database and stderr, and the unconditional
+cleanup removes them. A completed, sealed scan retains only a strict sanitized attestation
+and sends SARIF directly to GitHub Code Scanning; high/critical findings are retained there before the final workflow
+step fails closed. Incomplete or invalid scan output is rejected. The service account's automatically created
+bootstrap API key was revoked without being copied or stored. Run the fixed `proof` mode before relying on a new or
+changed trust mapping.
+
+As configured on 2026-07-29, the dedicated OpenAI project has a hard monthly limit of USD 25, alerts at USD 20 and
+USD 25, and permits only `gpt-5.6-sol` and `gpt-5.6-terra`. Each allowed model is capped at 500,000 tokens/minute and
+120 requests/minute for this project. These OpenAI account controls are mutable external state and should be checked
+again before a release scan; they are not asserted by the repository workflow.
+
+GitHub secret scanning and push protection are enabled for the public repository. The 2026-07-29 local current-tree
+and reachable-history credential-pattern scan found no matching secret paths, and GitHub reported zero secret-scanning
+alerts. This is defense in depth, not proof that arbitrary future content is safe; review every source and artifact
+diff before pushing.
+
+For a future CI release, the protected environment must supply these secrets only to the matching release job:
 
 - `DESSMETAL_SIGNING_CERTIFICATES_P12_BASE64` and `DESSMETAL_SIGNING_CERTIFICATES_P12_PASSWORD` for Developer ID
   Application/Installer signing;
 - `DESSMETAL_NOTARY_KEY_P8_BASE64` and `DESSMETAL_NOTARY_KEY_ID` for Apple notarization; and
 - `DESSMETAL_NOTARY_ISSUER_ID` for a Team API key. Leave the issuer secret unset for an Individual API key.
+
+It also needs the non-secret `DESSMETAL_APP_IDENTITY` and `DESSMETAL_INSTALLER_IDENTITY` environment variables. The
+environment protection was created without copying or changing any Apple credential; those release values must be
+configured separately before the next sign/notarize dispatch.
 
 Validation runs natively on both GitHub's `macos-15` arm64 runner and `macos-15-intel` x86_64 runner. Each runner
 executes strict/stress AU checks plus the Steinberg validator's standard and extensive suites. Run `30454055926`
@@ -198,8 +240,8 @@ the only sanitizer coverage.
 4. If a pristine first-install result is desired, remove the existing installed bundles and receipts through
    the approved uninstall path, then repeat the exact installer test. The completed adversarial Upgrade proves the
    relocation correction but is not a pristine uninstall/reinstall.
-5. Configure required reviewers on the GitHub `macos-release` environment and review each dispatch input and
-   transfer-confirmation phrase before any later release-workflow operation.
+5. Recheck the required reviewer and main-only policy on both protected GitHub environments, then review every
+   dispatch input and transfer-confirmation phrase before a later release-workflow operation.
 
 An unnotarized Developer ID candidate is for owner review, not a finished shareable macOS release.
 
@@ -210,19 +252,30 @@ An unnotarized Developer ID candidate is for owner review, not a finished sharea
 3. Run `./package_mac.sh --unsigned` and verify the promoted validation-only six-file set.
 4. Clean-install the exact staged AU; rerun state migration, strict/stress `auval`, and offline validation whenever
    the binary changes.
-5. Run `./package_mac.sh`, approving Developer ID Keychain access only if macOS prompts.
-6. Verify `BUILD-INFO.txt`, identities, hardened runtime, certificate chains, trusted timestamps, PKG payload byte
+5. On the exact tagged `main` commit, manually run `.github/workflows/codex-security.yml` in `deep` mode with the
+   approved source-archive SHA-256, tag, explicit confirmation phrase, and an owner-reviewed cost threshold. Require
+   complete coverage, no high/critical findings, and retain its run ID. The scanner's `max_cost_usd` input is an
+   estimated stop threshold, not an account-level hard spending cap; configure project budget/rate limits in OpenAI
+   as the independent backstop.
+6. Supply that exact deep-scan run ID together with the matching successful macOS validation run ID to the `sign`
+   operation in `.github/workflows/macos-release.yml`. The release gate downloads the sanitized attestation and
+   independently checks its schema, run, commit, tag, source hash, scanner pin, coverage, policy, and WIF refresh
+   evidence before signing credentials are exposed.
+7. Run `./package_mac.sh`, approving Developer ID Keychain access only if macOS prompts.
+8. Verify `BUILD-INFO.txt`, identities, hardened runtime, certificate chains, trusted timestamps, PKG payload byte
    identity, both-architecture dSYM UUIDs, exact six-file contents, checksums, and mounted DMG contents. Expand the
    three component packages and require the exact fixed destinations, `@relocatable=false`, zero `relocate/bundle`
    entries, and exact strict bundle identifiers listed above.
-7. While a same-bundle-ID app copy exists outside `/Applications`, install the exact signed package and verify
+9. While a same-bundle-ID app copy exists outside `/Applications`, install the exact signed package and verify
    `/Applications/DessMetal.app`, the two fixed system plug-in destinations, receipts, and the absence of PackageKit
    relocation in the new `/var/log/install.log` interval.
-8. For future releases or changed assets, complete the applicable provenance and controlled-listening review.
-9. Ask for approval of the exact replacement signed DMG hash before submitting it to Apple.
-10. Run `DESSMETAL_NOTARY_PROFILE=existing-profile ./notarize_mac.sh <approved-dmg-sha256>`, then record the
+10. For future releases or changed assets, complete the applicable provenance and controlled-listening review.
+11. Ask for approval of the exact replacement signed DMG hash before submitting it to Apple.
+12. Run `DESSMETAL_NOTARY_PROFILE=existing-profile ./notarize_mac.sh <approved-dmg-sha256>`, then record the
     replacement post-staple DMG hash and repeat Gatekeeper and the adversarial clean-install checks.
-11. Publish only after the exact tag, CI run, notarization, asset digests, and release body agree. Require separate
-    approval for every future tag, artifact upload, release publication, or visibility change.
+13. Publish only after the exact tag, CI run, Codex Security attestation, notarization, asset digests, and release body
+    agree. Require separate approval for every future tag, artifact upload, release publication, or visibility change.
 
-No release script accepts legal terms, creates credentials, modifies a Developer account, or publishes a release.
+No local release script accepts legal terms, creates credentials, modifies a Developer account, or publishes a
+release. The manual GitHub workflow can create and upload assets to a draft after its explicit gates; it never
+publishes that draft.

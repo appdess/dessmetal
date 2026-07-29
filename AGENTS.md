@@ -68,11 +68,19 @@ public release.
 - [`.github/workflows/macos-ci.yml`](.github/workflows/macos-ci.yml) is the credential-free push, pull-request, and
   manual validation gate. For release signing, require a successful push or manual run on `main` for the exact
   release commit; a pull-request run alone does not satisfy the release gate.
+- [`.github/workflows/codex-security.yml`](.github/workflows/codex-security.yml) is the protected manual source-scan
+  gate. It uses GitHub OIDC and OpenAI workload identity federation; do not add a reusable OpenAI API key or expose
+  its short-lived token outside the scanner step. A release requires a successful `deep` attestation for the exact
+  tagged commit and source-archive hash.
 - [`.github/workflows/macos-release.yml`](.github/workflows/macos-release.yml) is the authoritative manual GitHub
   chain: `sign` -> `notarize` -> `draft`. Its inputs bind an existing version tag to an exact commit, source-archive
-  hash, successful CI or prior workflow run, approved artifact hashes, and the protected `macos-release` environment.
+  hash, successful CI and Codex Security runs or a prior release-workflow run, approved artifact hashes, and the
+  protected `macos-release` environment.
   Follow the live workflow inputs and [RELEASE.md](RELEASE.md); do not copy changing hashes, run IDs, or confirmation
   phrases into this file.
+- Keep the Codex Security package coordinate, tarball hash, committed npm lockfile, protected-environment lock hash,
+  scan attestation, and release attestation verifier synchronized. The scanner must install with `npm ci
+  --ignore-scripts`; do not replace the full locked graph with a top-level-only npm pin.
 - The `draft` operation creates a GitHub draft release only. Publishing that draft, changing repository visibility,
   or uploading release artifacts through any other route requires separate explicit owner approval after the
   remaining release gates are closed.

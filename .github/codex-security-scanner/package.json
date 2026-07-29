@@ -1,0 +1,9 @@
+{
+  "name": "dessmetal-codex-security-ci",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Locked dependency graph for the DessMetal Codex Security GitHub Actions gate.",
+  "dependencies": {
+    "@openai/codex-security": "0.1.1"
+  }
+}

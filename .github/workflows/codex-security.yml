@@ -1,0 +1,883 @@
+name: Codex Security release scan
+run-name: Codex Security ${{ inputs.scan_mode }} ${{ inputs.source_commit }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      scan_mode:
+        description: Proof the keyless bridge, or scan the exact main commit
+        required: true
+        type: choice
+        options:
+          - proof
+          - standard
+          - deep
+      source_commit:
+        description: Exact 40-character main commit to bind to this run
+        required: true
+        type: string
+      approved_source_archive_sha256:
+        description: Approved SHA-256 from git archive of source_commit
+        required: true
+        type: string
+      release_tag:
+        description: Existing vMAJOR.MINOR.PATCH tag; required for deep release scans
+        required: false
+        type: string
+      max_cost_usd:
+        description: Estimated scanner stop threshold in USD (not a hard billing cap)
+        required: true
+        default: "5"
+        type: string
+      confirmation:
+        description: Type SCAN DESSMETAL followed by the mode and exact source commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-security-${{ inputs.source_commit }}-${{ inputs.scan_mode }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: Verify immutable scan inputs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      source_commit: ${{ steps.verify.outputs.source_commit }}
+      source_archive_sha256: ${{ steps.verify.outputs.source_archive_sha256 }}
+      release_tag: ${{ steps.verify.outputs.release_tag }}
+      scan_mode: ${{ steps.verify.outputs.scan_mode }}
+      max_cost_usd: ${{ steps.verify.outputs.max_cost_usd }}
+    steps:
+      # v4.2.2, resolved from the official actions/checkout repository.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Fail closed unless main, commit, tag, source hash, cost, and confirmation agree
+        id: verify
+        env:
+          SCAN_MODE: ${{ inputs.scan_mode }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          APPROVED_SOURCE_HASH: ${{ inputs.approved_source_archive_sha256 }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          MAX_COST_USD: ${{ inputs.max_cost_usd }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -Eeuo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$SOURCE_COMMIT"
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$APPROVED_SOURCE_HASH" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$MAX_COST_USD" =~ ^[0-9]+([.][0-9]{1,2})?$ ]]
+          awk -v amount="$MAX_COST_USD" 'BEGIN { exit !(amount > 0 && amount <= 25) }'
+          test "$CONFIRMATION" = "SCAN DESSMETAL $SCAN_MODE $SOURCE_COMMIT"
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test -z "$(git status --porcelain)"
+          source_hash="$(git archive --format=tar HEAD | sha256sum | awk '{print $1}')"
+          test "$source_hash" = "$APPROVED_SOURCE_HASH"
+
+          if [[ "$SCAN_MODE" == deep ]]; then
+            [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$SOURCE_COMMIT"
+          elif [[ -n "$RELEASE_TAG" ]]; then
+            [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$SOURCE_COMMIT"
+          fi
+
+          {
+            printf 'source_commit=%s\n' "$SOURCE_COMMIT"
+            printf 'source_archive_sha256=%s\n' "$source_hash"
+            printf 'release_tag=%s\n' "$RELEASE_TAG"
+            printf 'scan_mode=%s\n' "$SCAN_MODE"
+            printf 'max_cost_usd=%s\n' "$MAX_COST_USD"
+          } >> "$GITHUB_OUTPUT"
+
+  scan:
+    name: Keyless Codex Security ${{ needs.gate.outputs.scan_mode }}
+    needs: gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    environment:
+      name: codex-security-release
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+    env:
+      OPENAI_WIF_AUDIENCE: ${{ vars.OPENAI_WIF_AUDIENCE }}
+      OPENAI_IDENTITY_PROVIDER_ID: ${{ vars.OPENAI_IDENTITY_PROVIDER_ID }}
+      OPENAI_SERVICE_ACCOUNT_ID: ${{ vars.OPENAI_SERVICE_ACCOUNT_ID }}
+      CODEX_SECURITY_PACKAGE: ${{ vars.CODEX_SECURITY_PACKAGE }}
+      CODEX_SECURITY_PACKAGE_SHA256: ${{ vars.CODEX_SECURITY_PACKAGE_SHA256 }}
+      CODEX_SECURITY_LOCK_SHA256: ${{ vars.CODEX_SECURITY_LOCK_SHA256 }}
+      SCAN_MODE: ${{ needs.gate.outputs.scan_mode }}
+      SOURCE_COMMIT: ${{ needs.gate.outputs.source_commit }}
+      SOURCE_ARCHIVE_SHA256: ${{ needs.gate.outputs.source_archive_sha256 }}
+      RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}
+      MAX_COST_USD: ${{ needs.gate.outputs.max_cost_usd }}
+    steps:
+      # v4.4.0, resolved from the official actions/setup-node repository.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22.23.1"
+
+      - name: Define isolated runner paths
+        run: |
+          set -Eeuo pipefail
+          {
+            printf 'WIF_HELPER=%s/dessmetal-openai-wif.py\n' "$RUNNER_TEMP"
+            printf 'WIF_HELPER_COUNTER=%s/dessmetal-wif-codex-invocations\n' "$RUNNER_TEMP"
+            printf 'SCANNER_LOCK_ROOT=%s/dessmetal-codex-security-lock\n' "$RUNNER_TEMP"
+            printf 'SCANNER_PACKAGE_ROOT=%s/dessmetal-codex-security-package\n' "$RUNNER_TEMP"
+            printf 'SCANNER_ROOT=%s/dessmetal-codex-security-cli\n' "$RUNNER_TEMP"
+            printf 'SCAN_ROOT=%s/dessmetal-codex-security-results\n' "$RUNNER_TEMP"
+            printf 'CODEX_SECURITY_STATE_DIR=%s/dessmetal-codex-security-state\n' "$RUNNER_TEMP"
+            printf 'ATTESTATION_ROOT=%s/dessmetal-codex-security-attestation\n' "$RUNNER_TEMP"
+            printf 'SANDBOX_PROBE_HOME=%s/dessmetal-codex-sandbox-probe-home\n' "$RUNNER_TEMP"
+            printf 'SANDBOX_PROBE_WORKSPACE=%s/dessmetal-codex-sandbox-probe-workspace\n' "$RUNNER_TEMP"
+          } >> "$GITHUB_ENV"
+
+      - name: Validate non-secret WIF and package configuration
+        run: |
+          set -Eeuo pipefail
+          test "$OPENAI_WIF_AUDIENCE" = https://api.openai.com/v1
+          test "$OPENAI_IDENTITY_PROVIDER_ID" = idp_qogpN1ZpwDCu3NroaZ6OjeH4
+          test "$OPENAI_SERVICE_ACCOUNT_ID" = user-LB72xJXEqSaonyw7fADmZ9Mk
+          test "$CODEX_SECURITY_PACKAGE" = @openai/codex-security@0.1.1
+          test "$CODEX_SECURITY_PACKAGE_SHA256" = ee8106dcf241fa6a630cad5c74a228aec49c391a09e99d87a9947a53fd630800
+          test "$CODEX_SECURITY_LOCK_SHA256" = 3aee5c0d074b70e5ee79976a67ceaab724072dfa04e7ecd5b8d1c1fc38ec7e05
+          test "$(node --version)" = v22.23.1
+          test "$(npm --version)" = 10.9.8
+          test "$GITHUB_REPOSITORY" = appdess/dessmetal
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$SOURCE_COMMIT"
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+
+      - name: Install the exact approved scanner outside the checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          lock_dir="$SCANNER_LOCK_ROOT"
+          package_dir="$SCANNER_PACKAGE_ROOT"
+          mkdir -m 700 "$lock_dir" "$package_dir" "$SCANNER_ROOT"
+
+          for file in package.json package-lock.json; do
+            gh api \
+              -H 'Accept: application/vnd.github.raw+json' \
+              "/repos/$GITHUB_REPOSITORY/contents/.github/codex-security-scanner/$file?ref=$SOURCE_COMMIT" \
+              > "$lock_dir/$file"
+            chmod 0600 "$lock_dir/$file"
+          done
+          test "$(sha256sum "$lock_dir/package.json" | awk '{print $1}')" = \
+            2ca9b57560893a58e3263aec03ad6dff4f5700a8aafaa15bb0d45bcb62918b99
+          test "$(sha256sum "$lock_dir/package-lock.json" | awk '{print $1}')" = \
+            "$CODEX_SECURITY_LOCK_SHA256"
+
+          python3 - "$lock_dir/package.json" "$lock_dir/package-lock.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          package = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          lock = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+          expected_dependency = {"@openai/codex-security": "0.1.1"}
+          if package.get("dependencies") != expected_dependency:
+              raise SystemExit("unexpected scanner package dependency")
+          if lock.get("lockfileVersion") != 3:
+              raise SystemExit("unexpected npm lockfile version")
+          packages = lock.get("packages")
+          if not isinstance(packages, dict) or len(packages) != 93:
+              raise SystemExit("unexpected locked scanner dependency count")
+          if packages.get("", {}).get("dependencies") != expected_dependency:
+              raise SystemExit("unexpected root lock dependency")
+          scanner = packages.get("node_modules/@openai/codex-security", {})
+          if scanner.get("version") != "0.1.1":
+              raise SystemExit("unexpected locked scanner version")
+          for name, value in packages.items():
+              if not name:
+                  continue
+              if not isinstance(value, dict) or value.get("link"):
+                  raise SystemExit(f"invalid lock entry: {name}")
+              resolved = value.get("resolved", "")
+              integrity = value.get("integrity", "")
+              if not resolved.startswith("https://registry.npmjs.org/"):
+                  raise SystemExit(f"non-registry lock entry: {name}")
+              if not integrity.startswith("sha512-"):
+                  raise SystemExit(f"missing SHA-512 integrity: {name}")
+          PY
+
+          package_name="$(npm pack --ignore-scripts --silent \
+            --pack-destination "$package_dir" "$CODEX_SECURITY_PACKAGE")"
+          package_path="$package_dir/$package_name"
+          test -f "$package_path"
+          test "$(sha256sum "$package_path" | awk '{print $1}')" = "$CODEX_SECURITY_PACKAGE_SHA256"
+          packed_integrity="sha512-$(openssl dgst -sha512 -binary "$package_path" | openssl base64 -A)"
+          locked_integrity="$(node -e \
+            'const l=require(process.argv[1]); process.stdout.write(l.packages["node_modules/@openai/codex-security"].integrity)' \
+            "$lock_dir/package-lock.json")"
+          test "$packed_integrity" = "$locked_integrity"
+
+          install -m 0600 "$lock_dir/package.json" "$SCANNER_ROOT/package.json"
+          install -m 0600 "$lock_dir/package-lock.json" "$SCANNER_ROOT/package-lock.json"
+          (
+            cd "$SCANNER_ROOT"
+            npm ci --ignore-scripts --no-audit --no-fund >/dev/null
+            npm ls --all >/dev/null
+          )
+          scanner="$SCANNER_ROOT/node_modules/.bin/codex-security"
+          test -x "$scanner"
+          test "$($scanner --version)" = 0.1.1
+          printf 'SCANNER=%s\n' "$scanner" >> "$GITHUB_ENV"
+          "$scanner" info --format json \
+            > "$RUNNER_TEMP/codex-security-info.json" \
+            2> "$RUNNER_TEMP/codex-security-stderr.log"
+
+      - name: Install a host-owned WIF credential helper before checkout
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          install -m 0500 /dev/stdin "$WIF_HELPER" <<'PY'
+          #!/usr/bin/env python3
+          import base64
+          import json
+          import os
+          import pathlib
+          import sys
+          import time
+          import urllib.parse
+          import urllib.request
+
+          ALLOW_DIRECT_PROOF = True
+
+          EXPECTED = {
+              "iss": "https://token.actions.githubusercontent.com",
+              "aud": "https://api.openai.com/v1",
+              "sub": "repo:appdess/dessmetal:environment:codex-security-release",
+              "repository": "appdess/dessmetal",
+              "repository_id": "1316019438",
+              "repository_owner_id": "33653533",
+              "ref": "refs/heads/main",
+              "workflow_ref": "appdess/dessmetal/.github/workflows/codex-security.yml@refs/heads/main",
+              "environment": "codex-security-release",
+              "event_name": "workflow_dispatch",
+          }
+
+          def fail(message: str) -> None:
+              print(f"dessmetal-wif: {message}", file=sys.stderr)
+              raise SystemExit(1)
+
+          def read_json(response) -> dict:
+              value = json.loads(response.read().decode("utf-8"))
+              if not isinstance(value, dict):
+                  fail("unexpected JSON response")
+              return value
+
+          audience = os.environ.get("OPENAI_WIF_AUDIENCE")
+          provider_id = os.environ.get("OPENAI_IDENTITY_PROVIDER_ID")
+          service_account_id = os.environ.get("OPENAI_SERVICE_ACCOUNT_ID")
+          request_url = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL")
+          request_token = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+          if not all((audience, provider_id, service_account_id, request_url, request_token)):
+              fail("required workload identity environment is missing")
+          if audience != EXPECTED["aud"]:
+              fail("unexpected workload identity audience")
+
+          auth_context = os.environ.get("WIF_AUTH_CONTEXT")
+          if auth_context not in {"proof", "codex"}:
+              fail("missing or invalid WIF auth context")
+          if not sys.platform.startswith("linux"):
+              fail("WIF helper requires the pinned Linux runner")
+          try:
+              parent_path = pathlib.Path(
+                  os.readlink(f"/proc/{os.getppid()}/exe")
+              ).resolve()
+          except Exception:
+              fail("could not verify the WIF helper parent")
+          if auth_context == "proof":
+              if not ALLOW_DIRECT_PROOF:
+                  fail("direct WIF proof is disabled after bootstrap")
+              if parent_path.name != "bash":
+                  fail("refusing direct WIF proof outside the workflow shell")
+          else:
+              expected_parent = os.environ.get("WIF_EXPECTED_CODEX_PARENT")
+              if not expected_parent or not pathlib.Path(expected_parent).is_absolute():
+                  fail("missing the expected pinned Codex parent path")
+              if parent_path != pathlib.Path(expected_parent).resolve():
+                  fail("refusing WIF exchange outside the pinned Codex auth-command context")
+
+          oidc_url = urllib.parse.urlsplit(request_url)
+          query = dict(urllib.parse.parse_qsl(oidc_url.query, keep_blank_values=True))
+          query["audience"] = audience
+          oidc_url = urllib.parse.urlunsplit(oidc_url._replace(query=urllib.parse.urlencode(query)))
+          oidc_request = urllib.request.Request(
+              oidc_url,
+              headers={"Authorization": f"bearer {request_token}"},
+          )
+          try:
+              with urllib.request.urlopen(oidc_request, timeout=15) as response:
+                  subject_token = read_json(response).get("value")
+          except Exception as error:
+              fail(f"GitHub OIDC request failed: {type(error).__name__}")
+          if not isinstance(subject_token, str) or not subject_token:
+              fail("GitHub OIDC response omitted the token")
+
+          try:
+              payload = subject_token.split(".")[1]
+              payload += "=" * (-len(payload) % 4)
+              claims = json.loads(base64.urlsafe_b64decode(payload).decode("utf-8"))
+          except Exception:
+              fail("could not decode GitHub OIDC claims")
+          for key, expected in EXPECTED.items():
+              if str(claims.get(key, "")) != expected:
+                  fail(f"GitHub OIDC claim mismatch: {key}")
+
+          exchange_body = json.dumps(
+              {
+                  "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+                  "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+                  "subject_token": subject_token,
+                  "identity_provider_id": provider_id,
+                  "service_account_id": service_account_id,
+              }
+          ).encode("utf-8")
+          exchange_request = urllib.request.Request(
+              "https://auth.openai.com/oauth/token",
+              data=exchange_body,
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(exchange_request, timeout=20) as response:
+                  exchanged = read_json(response)
+          except Exception as error:
+              fail(f"OpenAI token exchange failed: {type(error).__name__}")
+          access_token = exchanged.get("access_token")
+          if not isinstance(access_token, str) or not access_token:
+              fail("OpenAI token exchange omitted the access token")
+          if exchanged.get("token_type") != "Bearer":
+              fail("OpenAI token exchange returned an unexpected token type")
+          if exchanged.get("issued_token_type") != "urn:ietf:params:oauth:token-type:access_token":
+              fail("OpenAI token exchange returned an unexpected issued token type")
+          expires_in = exchanged.get("expires_in")
+          if not isinstance(expires_in, int) or not 0 < expires_in <= 3600:
+              fail("OpenAI token exchange returned an invalid lifetime")
+
+          if auth_context == "codex":
+              counter = pathlib.Path(os.environ["WIF_HELPER_COUNTER"])
+              with counter.open("a", encoding="utf-8") as output:
+                  output.write(f"{time.monotonic_ns()}\n")
+              counter.chmod(0o600)
+          print(access_token)
+          PY
+          test -x "$WIF_HELPER"
+          helper_hash="$(sha256sum "$WIF_HELPER" | awk '{print $1}')"
+          printf 'WIF_HELPER_BOOTSTRAP_SHA256=%s\n' "$helper_hash" >> "$GITHUB_ENV"
+
+      - name: Prove exact OIDC claims and a least-privilege OpenAI API request
+        run: |
+          set -Eeuo pipefail
+          set +x
+          umask 077
+          access_token="$(WIF_AUTH_CONTEXT=proof "$WIF_HELPER")"
+          test -n "$access_token"
+          printf '::add-mask::%s\n' "$access_token"
+          ACCESS_TOKEN="$access_token" python3 - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.request
+
+          body = json.dumps(
+              {
+                  "model": "gpt-5.6-terra",
+                  "input": "Return exactly DESSMETAL_WIF_OK.",
+                  "max_output_tokens": 128,
+                  "store": False,
+              }
+          ).encode("utf-8")
+          request = urllib.request.Request(
+              "https://api.openai.com/v1/responses",
+              data=body,
+              headers={
+                  "Authorization": f"Bearer {os.environ['ACCESS_TOKEN']}",
+                  "Content-Type": "application/json",
+              },
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=90) as response:
+                  value = json.loads(response.read().decode("utf-8"))
+          except Exception as error:
+              print(f"OpenAI WIF API proof failed: {type(error).__name__}", file=sys.stderr)
+              raise SystemExit(1)
+          text = "".join(
+              part.get("text", "")
+              for item in value.get("output", [])
+              for part in item.get("content", [])
+              if isinstance(part, dict) and part.get("type") == "output_text"
+          )
+          if "DESSMETAL_WIF_OK" not in text:
+              raise SystemExit("OpenAI WIF API proof returned unexpected output")
+          PY
+          unset access_token ACCESS_TOKEN
+          test "$(sha256sum "$WIF_HELPER" | awk '{print $1}')" = "$WIF_HELPER_BOOTSTRAP_SHA256"
+          chmod 0700 "$WIF_HELPER"
+          python3 - "$WIF_HELPER" <<'PY'
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          source = path.read_text(encoding="utf-8")
+          original = "ALLOW_DIRECT_PROOF = True"
+          hardened = "ALLOW_DIRECT_PROOF = False"
+          if source.count(original) != 1 or hardened in source:
+              raise SystemExit("could not harden the WIF helper exactly once")
+          path.write_text(source.replace(original, hardened), encoding="utf-8")
+          PY
+          chmod 0500 "$WIF_HELPER"
+          helper_hash="$(sha256sum "$WIF_HELPER" | awk '{print $1}')"
+          printf 'WIF_HELPER_SHA256=%s\n' "$helper_hash" >> "$GITHUB_ENV"
+
+      - name: Prove the pinned Codex sandbox hides host identity credentials
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          mkdir -m 700 "$SANDBOX_PROBE_HOME" "$SANDBOX_PROBE_WORKSPACE"
+          install -m 0600 /dev/stdin "$SANDBOX_PROBE_HOME/config.toml" <<'TOML'
+          approval_policy = "never"
+          allow_login_shell = false
+          default_permissions = "dessmetal_probe"
+
+          [shell_environment_policy]
+          inherit = "all"
+          ignore_default_excludes = false
+          exclude = [
+            "ACTIONS_ID_TOKEN_REQUEST_*",
+            "CODEX_API_KEY",
+            "CODEX_HOME",
+            "OPENAI_API_KEY",
+            "RUNNER_TEMP",
+            "WIF_*",
+            "*TOKEN*",
+            "*SECRET*",
+            "*KEY*",
+          ]
+
+          [permissions.dessmetal_probe.filesystem]
+          ":root" = "read"
+          ":workspace_roots" = "write"
+          TOML
+          host_shell_pid="$$"
+          # Expansion must occur inside the sandbox.
+          # shellcheck disable=SC2016
+          CODEX_HOME="$SANDBOX_PROBE_HOME" \
+            "$SCANNER_ROOT/node_modules/.bin/codex" sandbox \
+              -P dessmetal_probe -C "$SANDBOX_PROBE_WORKSPACE" -- \
+              /bin/bash -ceu '
+                test -d /proc/1
+                test -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
+                test -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
+                test -z "${CODEX_HOME:-}"
+                test ! -e "/proc/$1/environ"
+                if /usr/bin/python3 -c '\''import socket; socket.create_connection(("api.openai.com", 443), 2)'\'' \
+                    >/dev/null 2>&1; then
+                  echo "sandbox unexpectedly allowed direct network access" >&2
+                  exit 1
+                fi
+              ' bash "$host_shell_pid"
+          printf 'sandbox_identity_isolation=passed\n'
+
+      - name: Create the fixed proof fixture
+        if: needs.gate.outputs.scan_mode == 'proof'
+        run: |
+          set -Eeuo pipefail
+          fixture="$RUNNER_TEMP/dessmetal-codex-security-proof"
+          mkdir -m 700 "$fixture"
+          install -m 0600 /dev/stdin "$fixture/README.md" <<'EOF'
+          # Fixed WIF proof fixture
+
+          This tiny repository exists only to prove Codex Security authentication,
+          command-backed token refresh, and complete scan output in GitHub Actions.
+          EOF
+          install -m 0600 /dev/stdin "$fixture/safe.cpp" <<'EOF'
+          #include <optional>
+
+          std::optional<int> positive_value(int value) {
+            if (value <= 0) return std::nullopt;
+            return value;
+          }
+          EOF
+          git -C "$fixture" init --quiet
+          git -C "$fixture" config user.name "DessMetal CI"
+          git -C "$fixture" config user.email "ci@invalid.example"
+          git -C "$fixture" add README.md safe.cpp
+          git -C "$fixture" commit --quiet -m "Fixed WIF proof fixture"
+          printf 'SCAN_TARGET=%s\n' "$fixture" >> "$GITHUB_ENV"
+
+      - name: Check out the exact source only after WIF proof
+        if: needs.gate.outputs.scan_mode != 'proof'
+        # v4.2.2, resolved from the official actions/checkout repository.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.gate.outputs.source_commit }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Re-verify the exact scan target and host-owned helper
+        if: needs.gate.outputs.scan_mode != 'proof'
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test -z "$(git status --porcelain)"
+          test "$(git archive --format=tar HEAD | sha256sum | awk '{print $1}')" = "$SOURCE_ARCHIVE_SHA256"
+          test "$(sha256sum "$WIF_HELPER" | awk '{print $1}')" = "$WIF_HELPER_SHA256"
+          printf 'SCAN_TARGET=%s\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+
+      - name: Run the report-only scanner with refreshable WIF credentials
+        id: run_scan
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          mkdir -m 700 "$SCAN_ROOT" "$CODEX_SECURITY_STATE_DIR"
+          : > "$WIF_HELPER_COUNTER"
+          chmod 600 "$WIF_HELPER_COUNTER"
+          # codex-security 0.1.1 requires an API-key-shaped login bootstrap and
+          # persists that value in its isolated CODEX_HOME. Give it a fixed,
+          # explicitly non-secret marker; the selected provider obtains real
+          # short-lived credentials only through the guarded auth command.
+          bootstrap_credential=DESSMETAL_NON_SECRET_BOOTSTRAP_ONLY
+          codex_parent="$SCANNER_ROOT/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
+          test -x "$codex_parent"
+
+          case "$SCAN_MODE" in
+            proof)
+              model=gpt-5.6-terra
+              reasoning=medium
+              refresh_ms=1000
+              cost_limit=1
+              scan_args=(--mode standard)
+              ;;
+            standard)
+              model=gpt-5.6-terra
+              reasoning=high
+              refresh_ms=120000
+              cost_limit="$MAX_COST_USD"
+              scan_args=(--mode standard)
+              ;;
+            deep)
+              model=gpt-5.6-sol
+              reasoning=xhigh
+              refresh_ms=120000
+              cost_limit="$MAX_COST_USD"
+              scan_args=(--mode deep)
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
+
+          set +e
+          WIF_AUTH_CONTEXT=codex WIF_EXPECTED_CODEX_PARENT="$codex_parent" \
+            CODEX_API_KEY="$bootstrap_credential" \
+            "$SCANNER" scan "$SCAN_TARGET" \
+              "${scan_args[@]}" \
+              --auth api-key \
+              --model "$model" \
+              --output-dir "$SCAN_ROOT" \
+              --fail-on-severity high \
+              --max-cost "$cost_limit" \
+              --codex 'model_provider="openai_wif"' \
+              --codex 'model_reasoning_effort="'"$reasoning"'"' \
+              --codex 'approval_policy="never"' \
+              --codex 'sandbox_mode="read-only"' \
+              --codex 'allow_login_shell=false' \
+              --codex 'web_search="disabled"' \
+              --codex 'history.persistence="none"' \
+              --codex 'analytics.enabled=false' \
+              --codex 'feedback.enabled=false' \
+              --codex 'shell_environment_policy.inherit="all"' \
+              --codex 'shell_environment_policy.ignore_default_excludes=false' \
+              --codex 'shell_environment_policy.exclude=["ACTIONS_ID_TOKEN_REQUEST_*","CODEX_API_KEY","CODEX_HOME","OPENAI_API_KEY","RUNNER_TEMP","WIF_*","*TOKEN*","*SECRET*","*KEY*"]' \
+              --codex 'model_providers.openai_wif.name="OpenAI WIF"' \
+              --codex 'model_providers.openai_wif.base_url="https://api.openai.com/v1"' \
+              --codex 'model_providers.openai_wif.wire_api="responses"' \
+              --codex 'model_providers.openai_wif.auth.command="'"$WIF_HELPER"'"' \
+              --codex 'model_providers.openai_wif.auth.args=[]' \
+              --codex 'model_providers.openai_wif.auth.timeout_ms=30000' \
+              --codex 'model_providers.openai_wif.auth.refresh_interval_ms='"$refresh_ms" \
+              --format json --full-output \
+              > "$RUNNER_TEMP/codex-security-result.json" \
+              2>> "$RUNNER_TEMP/codex-security-stderr.log"
+          scan_exit=$?
+          set -e
+          unset bootstrap_credential codex_parent CODEX_API_KEY WIF_EXPECTED_CODEX_PARENT
+          {
+            printf 'exit_code=%s\n' "$scan_exit"
+            printf 'model=%s\n' "$model"
+            printf 'reasoning=%s\n' "$reasoning"
+            printf 'refresh_ms=%s\n' "$refresh_ms"
+          } >> "$GITHUB_OUTPUT"
+          test "$(sha256sum "$WIF_HELPER" | awk '{print $1}')" = "$WIF_HELPER_SHA256"
+
+      - name: Validate sealed output and create a sanitized attestation
+        id: attest
+        env:
+          SCAN_EXIT_CODE: ${{ steps.run_scan.outputs.exit_code }}
+          SCAN_MODEL: ${{ steps.run_scan.outputs.model }}
+          SCAN_REASONING: ${{ steps.run_scan.outputs.reasoning }}
+          SCAN_REFRESH_MS: ${{ steps.run_scan.outputs.refresh_ms }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          [[ "$SCAN_EXIT_CODE" == 0 || "$SCAN_EXIT_CODE" == 1 ]]
+          if [[ "$SCAN_MODE" != proof ]]; then
+            test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+            test -z "$(git status --porcelain)"
+            test "$(git archive --format=tar HEAD | sha256sum | awk '{print $1}')" = "$SOURCE_ARCHIVE_SHA256"
+          fi
+          "$SCANNER" export "$SCAN_ROOT" --export-format json \
+            --output "$RUNNER_TEMP/codex-security-sealed-export.json" \
+            2>> "$RUNNER_TEMP/codex-security-stderr.log"
+          test -s "$RUNNER_TEMP/codex-security-sealed-export.json"
+          codex_helper_calls="$(wc -l < "$WIF_HELPER_COUNTER" | tr -d ' ')"
+          test "$codex_helper_calls" -ge 2
+          helper_first_ns="$(LC_ALL=C sort -n "$WIF_HELPER_COUNTER" | head -1)"
+          helper_last_ns="$(LC_ALL=C sort -n "$WIF_HELPER_COUNTER" | tail -1)"
+          [[ "$helper_first_ns" =~ ^[0-9]+$ ]]
+          [[ "$helper_last_ns" =~ ^[0-9]+$ ]]
+          helper_gap_ms="$(( (helper_last_ns - helper_first_ns) / 1000000 ))"
+          test "$helper_gap_ms" -ge "$((SCAN_REFRESH_MS - 100))"
+          export CODEX_HELPER_CALLS="$codex_helper_calls"
+          export CODEX_HELPER_REFRESH_GAP_MS="$helper_gap_ms"
+          mkdir -m 700 "$ATTESTATION_ROOT"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import re
+          import sys
+
+          root = pathlib.Path(os.environ["SCAN_ROOT"])
+          manifests = list(root.rglob("scan-manifest.json"))
+          coverages = list(root.rglob("coverage.json"))
+          findings_files = list(root.rglob("findings.json"))
+          if len(manifests) != 1 or len(coverages) != 1 or len(findings_files) != 1:
+              raise SystemExit("expected exactly one sealed scan output")
+          manifest_path, coverage_path, findings_path = manifests[0], coverages[0], findings_files[0]
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
+          findings = json.loads(findings_path.read_text(encoding="utf-8"))
+          if manifest.get("scan", {}).get("status") != "completed":
+              raise SystemExit("scan manifest is not completed")
+          if coverage.get("completeness") != "complete":
+              raise SystemExit("scan coverage is not complete")
+          expected_coverage_mode = "deep_repository" if os.environ["SCAN_MODE"] == "deep" else "repository"
+          if coverage.get("mode") != expected_coverage_mode:
+              raise SystemExit("unexpected scan coverage mode")
+          scan_id = manifest.get("scan", {}).get("id")
+          if not scan_id or coverage.get("scanId") != scan_id or findings.get("scanId") != scan_id:
+              raise SystemExit("scan identifiers do not agree")
+          if manifest.get("scan", {}).get("sealedAt") != manifest.get("scan", {}).get("completedAt"):
+              raise SystemExit("scan seal timestamp does not match completion")
+          producer = manifest.get("scan", {}).get("producer", {})
+          if producer != {"name": "codex-security-plugin", "version": "0.1.14"}:
+              raise SystemExit("unexpected scan producer")
+          if manifest.get("scan", {}).get("coverageRef") != "coverage.json":
+              raise SystemExit("unexpected coverage reference")
+          if manifest.get("scan", {}).get("findingsRef") != "findings.json":
+              raise SystemExit("unexpected findings reference")
+
+          def digest(path: pathlib.Path) -> str:
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+
+          sealed = {
+              "scan-manifest.json": digest(manifest_path),
+              "coverage.json": digest(coverage_path),
+              "findings.json": digest(findings_path),
+          }
+          declared = {
+              item.get("path"): item.get("sha256")
+              for item in manifest.get("scan", {}).get("artifacts", [])
+              if isinstance(item, dict)
+          }
+          for name in ("coverage.json", "findings.json"):
+              if declared.get(name) != sealed[name]:
+                  raise SystemExit(f"sealed artifact hash mismatch: {name}")
+
+          finding_items = findings.get("findings", [])
+          if not isinstance(finding_items, list):
+              raise SystemExit("invalid findings document")
+          blocking = sum(
+              1
+              for finding in finding_items
+              if finding.get("severity", {}).get("level") in {"critical", "high"}
+          )
+          if blocking:
+              result = "fail"
+          else:
+              result = "pass"
+          scan_exit = int(os.environ["SCAN_EXIT_CODE"])
+          if (scan_exit == 0) != (blocking == 0):
+              raise SystemExit("scanner exit code and blocking-finding policy disagree")
+
+          package = os.environ["CODEX_SECURITY_PACKAGE"]
+          if package != "@openai/codex-security@0.1.1":
+              raise SystemExit("unexpected scanner package")
+          source_commit = os.environ["SOURCE_COMMIT"]
+          source_hash = os.environ["SOURCE_ARCHIVE_SHA256"]
+          if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+              raise SystemExit("invalid source commit")
+          if not re.fullmatch(r"[0-9a-f]{64}", source_hash):
+              raise SystemExit("invalid source archive hash")
+          if os.environ["SCAN_MODE"] != "proof":
+              target = manifest.get("scan", {}).get("target", {})
+              if target.get("kind") != "git_revision" or target.get("revision") != source_commit:
+                  raise SystemExit("scan target is not the exact source commit")
+
+          refresh_interval_ms = int(os.environ["SCAN_REFRESH_MS"])
+          refresh_gap_ms = int(os.environ["CODEX_HELPER_REFRESH_GAP_MS"])
+          if refresh_gap_ms < refresh_interval_ms - 100:
+              raise SystemExit("command-backed WIF refresh was not proven")
+
+          attestation = {
+              "schema": "dessmetal.codex-security-attestation.v1",
+              "repository": "appdess/dessmetal",
+              "workflow": ".github/workflows/codex-security.yml",
+              "workflow_run_id": int(os.environ["GITHUB_RUN_ID"]),
+              "workflow_sha": os.environ["GITHUB_SHA"],
+              "event": "workflow_dispatch",
+              "result": result,
+              "scan_mode": os.environ["SCAN_MODE"],
+              "target": "fixed-proof-fixture" if os.environ["SCAN_MODE"] == "proof" else "repository",
+              "source_commit": source_commit,
+              "source_archive_sha256": source_hash,
+              "release_tag": os.environ.get("RELEASE_TAG", ""),
+              "coverage": "complete",
+              "policy_threshold": "high",
+              "blocking_findings": blocking,
+              "total_findings": len(finding_items),
+              "model": os.environ["SCAN_MODEL"],
+              "reasoning_effort": os.environ["SCAN_REASONING"],
+              "scanner_package": package,
+              "scanner_package_sha256": os.environ["CODEX_SECURITY_PACKAGE_SHA256"],
+              "scanner_lock_sha256": os.environ["CODEX_SECURITY_LOCK_SHA256"],
+              "wif_provider_id": os.environ["OPENAI_IDENTITY_PROVIDER_ID"],
+              "wif_service_account_id": os.environ["OPENAI_SERVICE_ACCOUNT_ID"],
+              "codex_auth_helper_invocations": int(os.environ["CODEX_HELPER_CALLS"]),
+              "codex_auth_helper_refresh_gap_ms": refresh_gap_ms,
+              "codex_auth_helper_refresh_interval_ms": refresh_interval_ms,
+              "codex_auth_helper_refresh_proven": True,
+              "sealed_artifact_sha256": sealed,
+          }
+          destination = pathlib.Path(os.environ["ATTESTATION_ROOT"]) / "attestation.json"
+          destination.write_text(json.dumps(attestation, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          destination.chmod(0o600)
+          PY
+          policy_result="$(jq -r '.result' "$ATTESTATION_ROOT/attestation.json")"
+          blocking_findings="$(jq -r '.blocking_findings' "$ATTESTATION_ROOT/attestation.json")"
+          {
+            printf 'policy_result=%s\n' "$policy_result"
+            printf 'blocking_findings=%s\n' "$blocking_findings"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Finalize sanitized attestation and summary
+        id: finalize
+        env:
+          POLICY_RESULT: ${{ steps.attest.outputs.policy_result }}
+          BLOCKING_FINDINGS: ${{ steps.attest.outputs.blocking_findings }}
+        run: |
+          set -Eeuo pipefail
+          attestation="$ATTESTATION_ROOT/attestation.json"
+          test -f "$attestation"
+          attestation_hash="$(sha256sum "$attestation" | awk '{print $1}')"
+          printf '%s  attestation.json\n' "$attestation_hash" > "$ATTESTATION_ROOT/attestation.json.sha256"
+          chmod 600 "$ATTESTATION_ROOT/attestation.json.sha256"
+          printf 'attestation_sha256=%s\n' "$attestation_hash" >> "$GITHUB_OUTPUT"
+          {
+            if [[ "$POLICY_RESULT" == pass ]]; then
+              echo '### Codex Security gate passed'
+            else
+              echo '### Codex Security scan completed with blocking findings'
+            fi
+            echo
+            printf -- "- Mode: \`%s\`\n" "$SCAN_MODE"
+            printf -- "- Source commit: \`%s\`\n" "$SOURCE_COMMIT"
+            printf -- "- Source archive SHA-256: \`%s\`\n" "$SOURCE_ARCHIVE_SHA256"
+            echo "- Authentication: short-lived GitHub OIDC -> OpenAI WIF; no API-key secret"
+            echo "- Coverage: complete"
+            echo "- Policy result: $POLICY_RESULT ($BLOCKING_FINDINGS high/critical finding(s))"
+            printf -- "- Sanitized attestation SHA-256: \`%s\`\n" "$attestation_hash"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Export SARIF without retaining raw scan artifacts
+        id: export_sarif
+        if: needs.gate.outputs.scan_mode != 'proof' && success()
+        run: |
+          set -Eeuo pipefail
+          if find "$SCAN_ROOT" -name scan-manifest.json -type f -print -quit | grep -q .; then
+            "$SCANNER" export "$SCAN_ROOT" --export-format sarif \
+              --source-root "$GITHUB_WORKSPACE" \
+              --output "$RUNNER_TEMP/dessmetal-codex-security.sarif" \
+              2>> "$RUNNER_TEMP/codex-security-stderr.log"
+            test -s "$RUNNER_TEMP/dessmetal-codex-security.sarif"
+            printf 'exists=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'exists=false\n' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload SARIF to GitHub code scanning
+        if: needs.gate.outputs.scan_mode != 'proof' && success() && steps.export_sarif.outputs.exists == 'true'
+        # v3.37.3, resolved from the official github/codeql-action repository.
+        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07
+        with:
+          sarif_file: ${{ runner.temp }}/dessmetal-codex-security.sarif
+          category: codex-security
+
+      - name: Upload only the sanitized attestation
+        if: always() && steps.attest.outcome == 'success' && steps.finalize.outcome == 'success'
+        # v4.6.2, resolved from the official actions/upload-artifact repository.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dessmetal-codex-security-attestation-${{ needs.gate.outputs.source_commit }}
+          path: ${{ runner.temp }}/dessmetal-codex-security-attestation/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Enforce the completed scan policy after retaining results
+        if: always()
+        env:
+          SCAN_EXIT_CODE: ${{ steps.run_scan.outputs.exit_code }}
+          POLICY_RESULT: ${{ steps.attest.outputs.policy_result }}
+          BLOCKING_FINDINGS: ${{ steps.attest.outputs.blocking_findings }}
+        run: |
+          set -Eeuo pipefail
+          test "$SCAN_EXIT_CODE" = 0
+          test "$POLICY_RESULT" = pass
+          test "$BLOCKING_FINDINGS" = 0
+
+      - name: Delete ephemeral tokens, helper, and raw reports
+        if: always()
+        run: |
+          set -Eeuo pipefail
+          rm -rf -- "$SCAN_ROOT" "$SCANNER_ROOT" "$SCANNER_LOCK_ROOT" \
+            "$SCANNER_PACKAGE_ROOT" "$CODEX_SECURITY_STATE_DIR" "$ATTESTATION_ROOT" \
+            "$SANDBOX_PROBE_HOME" "$SANDBOX_PROBE_WORKSPACE"
+          rm -f -- "$WIF_HELPER" "$WIF_HELPER_COUNTER" \
+            "$RUNNER_TEMP/codex-security-result.json" \
+            "$RUNNER_TEMP/codex-security-stderr.log" \
+            "$RUNNER_TEMP/codex-security-info.json" \
+            "$RUNNER_TEMP/codex-security-sealed-export.json" \
+            "$RUNNER_TEMP/dessmetal-codex-security.sarif"
