@@ -201,9 +201,10 @@ jobs:
           jq -e \
             --arg repository "$GITHUB_REPOSITORY" \
             --arg source_commit "$SOURCE_COMMIT" \
+            --arg expected_run_name "Codex Security deep $SOURCE_COMMIT" \
             '(.path == ".github/workflows/codex-security.yml" or
                (.path | startswith(".github/workflows/codex-security.yml@"))) and
-             .name == "Codex Security release scan" and
+             .name == $expected_run_name and .display_title == $expected_run_name and
              .event == "workflow_dispatch" and
              .status == "completed" and .conclusion == "success" and
              .head_sha == $source_commit and .head_branch == "main" and
