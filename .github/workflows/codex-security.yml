@@ -602,7 +602,7 @@ jobs:
             proof)
               model=gpt-5.6-terra
               reasoning=medium
-              refresh_ms=1000
+              refresh_ms=5000
               cost_limit="$MAX_COST_USD"
               scan_args=(--mode standard)
               ;;
@@ -661,33 +661,38 @@ jobs:
           set -e
           unset bootstrap_credential codex_parent CODEX_API_KEY WIF_EXPECTED_CODEX_PARENT
           if [[ "$scan_exit" == 2 ]]; then
-            python3 - "$RUNNER_TEMP/codex-security-result.json" <<'PY'
-          import json
+            python3 - "$RUNNER_TEMP/codex-security-stderr.log" <<'PY'
+          import hashlib
           import pathlib
           import re
           import sys
 
           path = pathlib.Path(sys.argv[1])
-          fallback = "scan failed before a safe structured diagnostic was available"
           try:
-              value = json.loads(path.read_text(encoding="utf-8"))
-              error = value.get("error", {}) if isinstance(value, dict) else {}
-              code = error.get("code", "SCAN_FAILED") if isinstance(error, dict) else "SCAN_FAILED"
-              message = error.get("message", fallback) if isinstance(error, dict) else fallback
-              if not isinstance(code, str) or not re.fullmatch(r"[A-Z0-9_]{1,64}", code):
-                  code = "SCAN_FAILED"
-              if not isinstance(message, str):
-                  message = fallback
+              raw = path.read_bytes()
           except Exception:
-              code, message = "SCAN_FAILED", fallback
-
-          message = re.sub(r"eyJ[A-Za-z0-9_-]{8,}[.][A-Za-z0-9_-]{8,}[.][A-Za-z0-9_-]{8,}", "[redacted]", message)
-          message = re.sub(r"sk-(?:proj-)?[A-Za-z0-9_*=-]{8,}", "[redacted]", message)
-          message = re.sub(r"(?:github_pat_|gh[pousr]_)[A-Za-z0-9_-]{8,}", "[redacted]", message, flags=re.I)
-          message = re.sub(r"(?i)(bearer|basic|token)([ +]+)[A-Za-z0-9.%_~+/*=-]{8,}", r"\1\2[redacted]", message)
-          message = re.sub(r"[A-Za-z0-9_~+/*=-]{48,}", "[redacted]", message)
-          message = " ".join(message.split())[:800]
-          print(f"codex-security diagnostic ({code}): {message}", file=sys.stderr)
+              raw = b""
+          digest = hashlib.sha256(raw).hexdigest()
+          text = raw.decode("utf-8", errors="replace")
+          cost = re.search(
+              r"^codex-security: Scan stopped: estimated cost \$([0-9]+(?:\.[0-9]{2,9})?) "
+              r"exceeded the \$([0-9]+(?:\.[0-9]{2,9})?) limit; partial output remains at .+[.]$",
+              text,
+              flags=re.MULTILINE,
+          )
+          if cost:
+              print(
+                  "codex-security diagnostic (COST_LIMIT_EXCEEDED): "
+                  f"estimated cost ${cost.group(1)} exceeded configured ${cost.group(2)} limit; "
+                  f"private stderr SHA-256 {digest}",
+                  file=sys.stderr,
+              )
+          else:
+              print(
+                  "codex-security diagnostic (SCAN_FAILED): private diagnostic did not match an "
+                  f"allowlisted failure; stderr SHA-256 {digest}",
+                  file=sys.stderr,
+              )
           PY
           fi
           {
