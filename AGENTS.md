@@ -5,7 +5,8 @@ standalone app, an Audio Unit v2, and a VST3 plug-in.
 
 Use [README.md](README.md) for the evergreen build and test commands. Use [RELEASE.md](RELEASE.md) for dated
 validation evidence, remaining owner gates, and the release procedure. Keep changing release results out of this
-file.
+file. Keep the README welcoming, personal, and product-focused; put exact hashes, run IDs, proof tables,
+release-status claims, and AI/process narration in RELEASE.md or generated release manifests instead.
 
 ## Worktree safety
 
@@ -21,7 +22,8 @@ file.
 - `./package_mac.sh --unsigned` is the credential-free release-pipeline gate. It builds and verifies universal
   APP/AU/VST3 bundles, component packages, the distribution package, DMG, checksums, manifests, and dSYMs.
 - `./package_mac.sh` requires the configured Developer ID Application and Installer identities. It signs locally but
-  does not notarize, upload, publish, or install anything.
+  does not notarize, upload, publish, or install anything. Run a release build only from the clean, exact commit that
+  will be reviewed and tagged.
 - Fresh bundles are staged under `NeuralAmpModeler/build-mac/release/products/`. Only a completely successful run may
   promote its six-file artifact set to `NeuralAmpModeler/build-mac/out/`.
 - Never share artifacts whose names contain `UNSIGNED-VALIDATION-ONLY`.
@@ -50,3 +52,23 @@ calibration levels, and model hashes before replacing any shipped model.
 Stop and request confirmation at the moment Keychain authorization, credentials, notarization, upload, tag creation,
 GitHub/GitLab publication, or legal acceptance is required. A successful signed local build is not a notarized or
 public release.
+
+## Notarization and GitHub release
+
+- Never describe an older candidate as belonging to a newer documentation or source commit. Release artifacts,
+  source-archive hashes, validation runs, tags, and manifests must all resolve to the same exact commit.
+- After the owner approves the signed DMG SHA-256, run
+  `DESSMETAL_NOTARY_PROFILE=<existing-profile> ./notarize_mac.sh <approved-dmg-sha256>`. It submits only that existing
+  signed six-file set to Apple, staples the result, and re-verifies it. This command contacts Apple; do not run it on
+  inferred approval or create credentials for it.
+- [`.github/workflows/macos-ci.yml`](.github/workflows/macos-ci.yml) is the credential-free push, pull-request, and
+  manual validation gate. For release signing, require a successful push or manual run on `main` for the exact
+  release commit; a pull-request run alone does not satisfy the release gate.
+- [`.github/workflows/macos-release.yml`](.github/workflows/macos-release.yml) is the authoritative manual GitHub
+  chain: `sign` -> `notarize` -> `draft`. Its inputs bind an existing version tag to an exact commit, source-archive
+  hash, successful CI or prior workflow run, approved artifact hashes, and the protected `macos-release` environment.
+  Follow the live workflow inputs and [RELEASE.md](RELEASE.md); do not copy changing hashes, run IDs, or confirmation
+  phrases into this file.
+- The `draft` operation creates a GitHub draft release only. Publishing that draft, changing repository visibility,
+  or uploading release artifacts through any other route requires separate explicit owner approval after the
+  remaining release gates are closed.
