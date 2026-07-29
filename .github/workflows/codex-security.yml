@@ -608,7 +608,11 @@ jobs:
               ;;
             standard)
               model=gpt-5.6-terra
-              reasoning=high
+              # Keep the protected main/release gate within the dedicated project's
+              # inference envelope. The scanner still requires complete
+              # repository coverage; this only reduces per-request reasoning
+              # pressure and serializes the native multi-agent review.
+              reasoning=medium
               refresh_ms=120000
               cost_limit="$MAX_COST_USD"
               scan_args=(--mode standard)
@@ -637,6 +641,7 @@ jobs:
               --max-cost "$cost_limit" \
               --codex 'model_provider="openai_wif"' \
               --codex 'model_reasoning_effort="'"$reasoning"'"' \
+              --codex 'features.multi_agent_v2.max_concurrent_threads_per_session=2' \
               --codex 'approval_policy="never"' \
               --codex 'sandbox_mode="read-only"' \
               --codex 'allow_login_shell=false' \
