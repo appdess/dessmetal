@@ -548,7 +548,7 @@ verify_resource_manifest()
   local resources="$bundle/Contents/Resources"
   local expected_models actual_models expected_irs actual_irs expected_images actual_images expected_fonts actual_fonts
   expected_models=$'DessBlock-green/model.nam\nDessDrive/OD808.nam\nDessDrive/SD1.nam\nDessDrive/TS9.nam\nDessDrive/aesahaettr.nam\nDessTortion-blue/DessTortion-blue.nam\nDessTortion-red/DessTortion-red.nam\nSickDess/SickDess.nam'
-  actual_models="$(cd "$resources/models" && find . -type f ! -path './IRs/*' -print | sed 's|^./||' | sort)"
+  actual_models="$(cd "$resources/models" && find . -type f ! -path './IRs/*' -print | sed 's|^./||' | LC_ALL=C sort)"
   [[ "$actual_models" == "$expected_models" ]] || {
     echo "Unexpected release model manifest in $bundle:" >&2
     printf '%s\n' "$actual_models" >&2
@@ -569,14 +569,14 @@ verify_resource_manifest()
     exit 1
   }
   expected_images=$'ArrowLeft.svg\nArrowRight.svg\nBackground.jpg\nBackground@2x.jpg\nBackground@3x.jpg\nCross.svg\nDessMetal/Background.png\nDessMetal/DessBlock-green.jpg\nDessMetal/DessTortion-blue.jpg\nDessMetal/DessTortion-red.jpg\nDessMetal/SickDess.jpg\nFile.svg\nFileBackground.png\nFileBackground@2x.png\nFileBackground@3x.png\nGear.svg\nGlobe.svg\nIRIconOff.svg\nIRIconOn.svg\nInputLevelBackground.png\nInputLevelBackground@2x.png\nInputLevelBackground@3x.png\nKnobBackground.png\nKnobBackground@2x.png\nKnobBackground@3x.png\nLines.png\nLines@2x.png\nLines@3x.png\nMeterBackground.png\nMeterBackground@2x.png\nMeterBackground@3x.png\nModelIcon.svg\nSlideSwitchHandle.png\nSlideSwitchHandle@2x.png\nSlideSwitchHandle@3x.png'
-  actual_images="$(cd "$resources" && find . -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.svg' \) -print | sed 's|^./||' | sort)"
+  actual_images="$(cd "$resources" && find . -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.svg' \) -print | sed 's|^./||' | LC_ALL=C sort)"
   [[ "$actual_images" == "$expected_images" ]] || {
     echo "Unexpected release image manifest in $bundle:" >&2
     printf '%s\n' "$actual_images" >&2
     exit 1
   }
   expected_fonts=$'Michroma-Regular.ttf\nRoboto-Regular.ttf'
-  actual_fonts="$(cd "$resources" && find . -type f -iname '*.ttf' -print | sed 's|^./||' | sort)"
+  actual_fonts="$(cd "$resources" && find . -type f -iname '*.ttf' -print | sed 's|^./||' | LC_ALL=C sort)"
   [[ "$actual_fonts" == "$expected_fonts" ]] || {
     echo "Unexpected release font manifest in $bundle:" >&2
     printf '%s\n' "$actual_fonts" >&2
