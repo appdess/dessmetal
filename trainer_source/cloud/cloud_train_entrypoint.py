@@ -8,40 +8,174 @@ import os
 import sys
 import json
 import argparse
+import re
 import subprocess
 from pathlib import Path
-from google.cloud import storage
 
 # Suppress urllib3 warnings
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="urllib3")
 
 
-def download_from_gcs(bucket_name: str, source_prefix: str, dest_dir: Path):
-    """Download files from GCS to local directory."""
-    client = storage.Client()
-    bucket = client.bucket(bucket_name)
-    
-    blobs = bucket.list_blobs(prefix=source_prefix)
+_MODEL_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
+
+
+def validated_model_name(value: str) -> str:
+    """Accept model names that are safe as local and remote path components."""
+    if not _MODEL_NAME_RE.fullmatch(value):
+        raise argparse.ArgumentTypeError(
+            "model name must contain only letters, numbers, '_' or '-', "
+            "start with a letter or number, and be at most 128 characters"
+        )
+    return value
+
+
+def normalized_gcs_prefix(source_prefix: str) -> str:
+    """Return a safe GCS prefix without its optional trailing slash."""
+    prefix = source_prefix.rstrip('/')
+    prefix_parts = prefix.split('/')
+    if (
+        not prefix
+        or prefix.startswith('/')
+        or '\\' in prefix
+        or any(part in ('', '.', '..') for part in prefix_parts)
+        or any(ord(character) < 32 or ord(character) == 127 for character in prefix)
+    ):
+        raise ValueError(f"Unsafe GCS source prefix: {source_prefix!r}")
+    return prefix
+
+
+def safe_gcs_download_path(blob_name: str, source_prefix: str, dest_dir: Path):
+    """Map one object below an exact GCS prefix to a contained local path."""
+    prefix = normalized_gcs_prefix(source_prefix)
+
+    # GCS may contain objects ending in '/' that are used as directory markers.
+    if blob_name == prefix or blob_name == f"{prefix}/":
+        return None
+
+    exact_prefix = f"{prefix}/"
+    if not blob_name.startswith(exact_prefix):
+        raise ValueError(
+            f"GCS object {blob_name!r} is outside exact prefix {exact_prefix!r}"
+        )
+
+    relative_name = blob_name[len(exact_prefix):]
+    is_directory_marker = relative_name.endswith('/')
+    path_name = relative_name[:-1] if is_directory_marker else relative_name
+    relative_parts = path_name.split('/')
+    if (
+        '\\' in path_name
+        or any(part in ('', '.', '..') for part in relative_parts)
+        or any(ord(character) < 32 or ord(character) == 127 for character in path_name)
+    ):
+        raise ValueError(f"Unsafe GCS object path: {blob_name!r}")
+    if is_directory_marker:
+        return None
+
+    if dest_dir.is_symlink():
+        raise ValueError(f"Download directory must not be a symlink: {dest_dir}")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    if dest_dir.is_symlink():
+        raise ValueError(f"Download directory must not be a symlink: {dest_dir}")
+    destination_root = dest_dir.resolve()
+    local_path = destination_root.joinpath(*relative_parts)
+    resolved_path = local_path.resolve(strict=False)
+
+    try:
+        contained = (
+            os.path.commonpath((str(destination_root), str(resolved_path)))
+            == str(destination_root)
+        )
+    except ValueError:
+        contained = False
+    if not contained or resolved_path != local_path:
+        raise ValueError(f"GCS object resolves outside its download directory: {blob_name!r}")
+
+    current_path = destination_root
+    for index, component in enumerate(relative_parts):
+        current_path /= component
+        if current_path.is_symlink():
+            raise ValueError(f"Download path contains a symlink: {blob_name!r}")
+        if (
+            index < len(relative_parts) - 1
+            and current_path.exists()
+            and not current_path.is_dir()
+        ):
+            raise ValueError(f"Download path has a file as an ancestor: {blob_name!r}")
+    if local_path.exists() and local_path.is_dir():
+        raise ValueError(f"Download target is an existing directory: {blob_name!r}")
+
+    return local_path
+
+
+def plan_gcs_downloads(blobs, source_prefix: str, dest_dir: Path):
+    """Validate a complete GCS listing before any object is downloaded."""
+    plan = []
+    planned_paths = set()
     for blob in blobs:
-        # Get relative path
-        rel_path = blob.name[len(source_prefix):].lstrip('/')
-        if not rel_path:
+        local_path = safe_gcs_download_path(blob.name, source_prefix, dest_dir)
+        if local_path is None:
             continue
-        
-        local_path = dest_dir / rel_path
+        if local_path in planned_paths:
+            raise ValueError(f"Multiple GCS objects map to the same path: {blob.name!r}")
+        if any(
+            local_path in existing_path.parents or existing_path in local_path.parents
+            for existing_path in planned_paths
+        ):
+            raise ValueError(f"GCS objects have a file/directory collision: {blob.name!r}")
+        planned_paths.add(local_path)
+        plan.append((blob, local_path))
+    return plan
+
+
+def download_from_gcs(
+    bucket_name: str,
+    source_prefix: str,
+    dest_dir: Path,
+    storage_client=None,
+):
+    """Download files from GCS to local directory."""
+    if storage_client is None:
+        from google.cloud import storage
+
+        storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
+
+    exact_prefix = f"{normalized_gcs_prefix(source_prefix)}/"
+    plan = plan_gcs_downloads(
+        list(bucket.list_blobs(prefix=exact_prefix)),
+        source_prefix,
+        dest_dir,
+    )
+
+    # Create and recheck every destination before the first remote write. A
+    # failed listing therefore cannot leave a partially refreshed dataset.
+    for blob, local_path in plan:
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        
+        if safe_gcs_download_path(blob.name, source_prefix, dest_dir) != local_path:
+            raise ValueError(f"Download target changed during preflight: {blob.name!r}")
+
+    for blob, local_path in plan:
         print(f"Downloading: {blob.name} -> {local_path}")
         blob.download_to_filename(str(local_path))
 
 
-def upload_to_gcs(bucket_name: str, source_dir: Path, dest_prefix: str):
+def upload_to_gcs(
+    bucket_name: str,
+    source_dir: Path,
+    dest_prefix: str,
+    storage_client=None,
+):
     """Upload directory contents to GCS."""
-    client = storage.Client()
-    bucket = client.bucket(bucket_name)
+    if storage_client is None:
+        from google.cloud import storage
+
+        storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
     
     for local_path in source_dir.rglob('*'):
+        if local_path.is_symlink():
+            raise ValueError(f"Refusing to upload a symlink: {local_path}")
         if local_path.is_file():
             rel_path = local_path.relative_to(source_dir)
             blob_name = f"{dest_prefix}/{rel_path}"
@@ -54,7 +188,12 @@ def upload_to_gcs(bucket_name: str, source_dir: Path, dest_prefix: str):
 def main():
     parser = argparse.ArgumentParser(description="Cloud training entrypoint")
     parser.add_argument("--bucket", required=True, help="GCS bucket name")
-    parser.add_argument("--model-name", required=True, help="Model name (e.g., DessBlock-green)")
+    parser.add_argument(
+        "--model-name",
+        required=True,
+        type=validated_model_name,
+        help="Model name (e.g., DessBlock-green)",
+    )
     parser.add_argument("--epochs", type=int, default=800, help="Max epochs")
     parser.add_argument("--threshold-esr", type=float, default=0.009, help="Early stopping ESR threshold")
     parser.add_argument("--input-level", type=float, required=True, help="Input dBu level")
@@ -82,8 +221,9 @@ def main():
     )
     
     # Download input.wav (shared across all models)
-    # Download input.wav (shared across all models)
     print("\n--- Downloading input.wav ---")
+    from google.cloud import storage
+
     client = storage.Client()
     bucket = client.bucket(args.bucket)
     blob = bucket.blob("training-data/input.wav")

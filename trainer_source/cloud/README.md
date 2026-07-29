@@ -29,6 +29,15 @@ The caller needs Google Cloud Application Default Credentials with access to
 the configured project and bucket. Building also needs Docker and registry
 authentication capable of pushing the configured `gcr.io` image.
 
+The container treats remote object names as untrusted input. Downloads must be
+below the exact requested prefix and are rejected if they contain traversal,
+ambiguous path components, control characters, or a destination symlink. Run
+the dependency-free regression suite with:
+
+```bash
+python3 -m unittest discover -s trainer_source/cloud/tests -p 'test_*.py'
+```
+
 ## Data preflight
 
 The cloud entrypoint expects:
