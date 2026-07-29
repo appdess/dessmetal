@@ -6,8 +6,9 @@ The results below apply to the current 0.1.1 source and the exact locally staged
 UI/control evidence came from the exact AU in a view-only validation host; audio-device startup and real-host
 load/playback/save-reopen evidence came separately from the exact standalone and Logic Pro AU. No 0.1.0 result is
 substituted for an exact-current gate. A fresh Developer ID Application/Installer candidate was built from the clean
-source snapshot. Notarization and the private GitHub review upload are separate operations; their results and exact
-post-staple hashes must be recorded in the release verification manifest rather than inferred from this source file.
+source snapshot. The source is available in the private GitHub review repository; release-artifact upload and
+notarization remain separate operations. Their results and exact post-staple hashes must be recorded in the release
+verification manifest rather than inferred from this source file.
 
 | Area | Status | Current evidence |
 | --- | --- | --- |
@@ -23,7 +24,7 @@ post-staple hashes must be recorded in the release verification manifest rather 
 | Logic Pro 11.2.2 | Pass | Exact AU discovery, instantiation, native UI, finite/non-silent playback, active/bypass interaction, save/reopen persistence |
 | Unsigned package | Pass | Exact validation-only six-file PKG/DMG/checksum/manifest/dSYM set, payload/resource/license checks, and DMG integrity |
 | Developer ID package | Pass locally | Fresh exact-source APP/AU/VST3 and PKG/DMG set; Developer ID chains/timestamps, hardened runtime, exact payload identity, dSYM UUIDs, checksums, licenses, and mounted contents verified |
-| GitHub Actions | Unrun remotely | Workflow syntax and static checks pass locally; no GitHub repository run is claimed |
+| GitHub Actions | Configured | Validation runs on pushes, pull requests, and manual dispatch; require a green push/manual run on `main` for the exact release commit before signing |
 | Apple notarization and private review upload | Pending external operation | No external result is claimed here; verify the exact release manifest |
 
 ## Compatibility and state
@@ -142,10 +143,11 @@ Validation runs natively on both GitHub's `macos-15` arm64 runner and `macos-15-
 executes strict/stress AU checks plus the Steinberg validator's standard and extensive suites. Notarization also
 assesses the exact inner PKG; a real privileged clean installation remains an external owner-machine gate.
 
-Publication remains a distinct manual GitHub action. The workflows pass local syntax/static validation but have not
-run in a GitHub repository. The current checkout has no configured remote; no GitHub repository creation or upload
-is claimed. GitLab validation imports no signing/notarization credentials, while its signed release job is manual
-and tag-only.
+Publication remains a distinct manual GitHub action. The private review repository is
+`https://github.com/appdess/dessmetal`, and `origin/main` is the source-review branch. Workflow status is external and
+commit-specific: verify a successful live run for the exact release commit rather than relying on a statement in
+this file. GitLab validation imports no signing/notarization credentials, while its signed release job is manual and
+tag-only.
 
 The local Xcode toolchain's AddressSanitizer runtime was independently reproduced hanging before `main()` even for a
 hello-world binary. The complete WAV corpus passed AddressSanitizer plus UndefinedBehaviorSanitizer with the installed
@@ -162,8 +164,8 @@ the only sanitizer coverage.
 4. Review and explicitly approve the exact signed DMG SHA-256 before any Apple notarization submission.
 5. After notarization, validate the staple, Gatekeeper app/install assessment, and a clean-account or clean-machine
    installation.
-6. If GitHub automation is desired, configure required reviewers on the `macos-release` environment, review each
-   exact dispatch input and transfer-confirmation phrase, then run the workflows in the real repository.
+6. Configure required reviewers on the GitHub `macos-release` environment, verify the exact-head validation run,
+   review each dispatch input and transfer-confirmation phrase, then run the release workflow.
 7. Ask separately before creating a tag, preparing a draft, or publishing a release. A transfer-confirmation phrase
    authorizes only the named workflow artifact upload, not tag creation or publication.
 
