@@ -145,6 +145,40 @@ jobs:
             printf 'SANDBOX_PROBE_WORKSPACE=%s/dessmetal-codex-sandbox-probe-workspace\n' "$RUNNER_TEMP"
           } >> "$GITHUB_ENV"
 
+      - name: Install and prove the Codex Linux sandbox prerequisite
+        run: |
+          set -Eeuo pipefail
+          # Codex uses bubblewrap on Linux. Ubuntu 24.04 additionally needs the
+          # packaged AppArmor profile; keep the host restriction enabled and
+          # load only the distribution-provided bwrap exception.
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            apparmor-profiles apparmor-utils bubblewrap
+          profile_source=/usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          profile_target=/etc/apparmor.d/bwrap-userns-restrict
+          test -f "$profile_source"
+          sudo install -m 0644 "$profile_source" "$profile_target"
+          sudo apparmor_parser -r "$profile_target"
+          if sysctl -n kernel.unprivileged_userns_clone >/dev/null 2>&1; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+            test "$(sysctl -n kernel.unprivileged_userns_clone)" = 1
+          fi
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
+            test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 1
+          fi
+          test "$(command -v bwrap)" = /usr/bin/bwrap
+          /usr/bin/bwrap --version
+          /usr/bin/bwrap \
+            --unshare-user \
+            --unshare-pid \
+            --unshare-net \
+            --ro-bind / / \
+            --dev /dev \
+            --proc /proc \
+            -- \
+            /usr/bin/true
+
       - name: Validate non-secret WIF and package configuration
         run: |
           set -Eeuo pipefail
@@ -489,6 +523,10 @@ jobs:
                 test -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
                 test -z "${CODEX_HOME:-}"
                 test ! -e "/proc/$1/environ"
+                if /usr/bin/sudo -n /bin/true >/dev/null 2>&1; then
+                  echo "sandbox unexpectedly retained sudo privilege" >&2
+                  exit 1
+                fi
                 if /usr/bin/python3 -c '\''import socket; socket.create_connection(("api.openai.com", 443), 2)'\'' \
                     >/dev/null 2>&1; then
                   echo "sandbox unexpectedly allowed direct network access" >&2
