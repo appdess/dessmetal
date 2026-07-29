@@ -642,6 +642,7 @@ jobs:
               --codex 'model_provider="openai_wif"' \
               --codex 'model_reasoning_effort="'"$reasoning"'"' \
               --codex 'features.multi_agent_v2.max_concurrent_threads_per_session=2' \
+              --codex 'developer_instructions="For this immutable GitHub Actions checkout, author scan-manifest.json scan.target.kind as git_revision and scan.target.revision as the exact output of git rev-parse HEAD. Do not use git_worktree or repository. Preserve complete repository coverage and every normal capability-preflight, inventory, validation, attack-path, and finalization requirement."' \
               --codex 'approval_policy="never"' \
               --codex 'sandbox_mode="read-only"' \
               --codex 'allow_login_shell=false' \
@@ -814,6 +815,11 @@ jobs:
               failure_class = "TIMEOUT"
           elif "scan completed without a result" in combined.lower():
               failure_class = "NO_RESULT"
+          elif failure_message == (
+              "Could not save the Codex Security scan: scan.target.kind: "
+              "must match the workbench target"
+          ):
+              failure_class = "TARGET_KIND_CONTRACT_MISMATCH"
           elif "workbench" in failure_message.lower():
               failure_class = "WORKBENCH_FAILURE"
           elif scan_status == "failed" and any(value == 0 for value in canonical.values()):
