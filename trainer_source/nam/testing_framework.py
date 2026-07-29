@@ -80,7 +80,7 @@ def test_model(data_config_path, model_config_path, ckpt_path, metrics_path, plo
             ]
     with open(model_config_path, "r") as fp:
         model_config = _json.load(fp)
-    model = _LightningModule.load_from_checkpoint(
+    model = _LightningModule.load_from_safe_checkpoint(
                 ckpt_path,
                 **_LightningModule.parse_config(model_config)
             )

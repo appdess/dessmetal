@@ -101,12 +101,26 @@ You can always use `--help` to see all command-line options.
 
 ## Inference
 
-Inference can be done with `inference_w_ckpt.py`. We provide a demo checkpoint `demo_ckpt.ckpt`.
+Inference can be done with `inference_w_ckpt.py`. Use a checkpoint produced by
+the current trainer together with its matching model config. The tracked
+`demo_ckpt.ckpt` is retained as a legacy deserialization fixture, but its layer
+layout does not match the current model configs.
+
+Checkpoint files are deserialized in PyTorch's restricted `weights_only=True`
+mode and must contain a non-empty tensor `state_dict` plus a positive sample
+rate. Framework-managed resume options that bypass this loader are rejected,
+and the utilities do not fall back to pickle-capable loading. PyTorch 2.6.0 or
+newer is required because older releases are affected by
+[CVE-2025-32434](https://github.com/advisories/GHSA-53q9-r3pm-6pq6), including
+when `weights_only=True` is requested; older or unverifiable versions fail
+closed. Treat model weights as untrusted data nonetheless, and separately
+verify a checkpoint's SHA-256 against a trusted source before using it when
+provenance matters.
 
 Usage example:
 
 ```bash
-python3 inference_w_ckpt.py --ckpt-path "demo_ckpt.ckpt" --input-path "my_input.wav" --g-vector 0.5 0.2 0.5 0.7 0.5 0.8 --output-dir .
+python3 inference_w_ckpt.py --ckpt-path "path/to/current-model.ckpt" --input-path "my_input.wav" --g-vector 0.5 0.2 0.5 0.7 0.5 0.8 --output-dir .
 ```
 
 ## Single Model Training

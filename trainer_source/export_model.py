@@ -81,7 +81,7 @@ def main():
 
     # Load model
     print("Loading model...")
-    model = LightningModule.load_from_checkpoint(
+    model = LightningModule.load_from_safe_checkpoint(
         str(best_ckpt),
         **LightningModule.parse_config(model_config)
     )

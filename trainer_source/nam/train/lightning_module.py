@@ -39,6 +39,7 @@ from ..models.losses import (
 from ..models.recurrent import LSTM as _LSTM
 from ..models.wavenet import WaveNet as _WaveNet
 from ..models.vanilla_wavenet import VanillaWaveNet as _VanillaWaveNet
+from .checkpoint import load_weights_only_checkpoint as _load_weights_only_checkpoint
 
 logger = _logging.getLogger(__name__)
 
@@ -183,8 +184,27 @@ class LightningModule(_pl.LightningModule, _InitializableFromConfig):
         return (
             cls(**config)
             if checkpoint_path is None
-            else cls.load_from_checkpoint(checkpoint_path, **config)
+            else cls.load_from_safe_checkpoint(checkpoint_path, **config)
         )
+
+    @classmethod
+    def load_from_safe_checkpoint(
+        cls,
+        checkpoint_path,
+        *,
+        map_location="cpu",
+        strict=True,
+        **kwargs,
+    ):
+        """Build a module from tensor-only checkpoint data and explicit config."""
+        checkpoint = _load_weights_only_checkpoint(
+            checkpoint_path,
+            map_location=map_location,
+        )
+        model = cls(**kwargs)
+        model.on_load_checkpoint(checkpoint)
+        model.load_state_dict(checkpoint["state_dict"], strict=strict)
+        return model
 
     @classmethod
     def parse_config(cls, config):
@@ -282,7 +302,7 @@ class LightningModule(_pl.LightningModule, _InitializableFromConfig):
         if len(batch) != 3:
              # Add basic check for expected batch structure
              raise ValueError(f"Expected batch to have 3 elements (x, g, y), but got {len(batch)}")
-        
+
         x, g, targets = batch
         if (g < 0).any():
             preds = self(x, pad_start=False)
@@ -482,5 +502,3 @@ class LightningModule(_pl.LightningModule, _InitializableFromConfig):
                 "Mel MRSTFT loss failed. Make sure you have a GPU."
             ) from e
 
-        
-        

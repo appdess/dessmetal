@@ -47,6 +47,7 @@ from ..models.metadata import UserMetadata as _UserMetadata
 from ..util import filter_warnings as _filter_warnings
 from ._version import PROTEUS_VERSION as _PROTEUS_VERSION, Version as _Version
 from .lightning_module import LightningModule as _LightningModule
+from .checkpoint import validated_trainer_options as _validated_trainer_options
 from . import metadata as _metadata
 
 # Training using the simplified trainers in NAM is done at 48k.
@@ -1459,6 +1460,10 @@ def train(
     settings_metadata = _metadata.Settings(ignore_checks=ignore_checks)
     data_metadata = _metadata.Data(latency=latency_analysis, checks=data_check_output)
 
+    trainer_options = _validated_trainer_options(
+        learning_config["trainer"],
+        context="learning_config.trainer",
+    )
     trainer = _pl.Trainer(
         callbacks=get_callbacks(
             threshold_esr,
@@ -1468,7 +1473,7 @@ def train(
         ),
         default_root_dir=train_path,
         fast_dev_run=fast_dev_run,
-        **learning_config["trainer"],
+        **trainer_options,
     )
     # Suppress the PossibleUserWarning about num_workers (Issue 345)
     with _filter_warnings("ignore", category=_PossibleUserWarning):
@@ -1477,7 +1482,7 @@ def train(
     # Go to best checkpoint
     best_checkpoint = trainer.checkpoint_callback.best_model_path
     if best_checkpoint != "":
-        model = _LightningModule.load_from_checkpoint(
+        model = _LightningModule.load_from_safe_checkpoint(
             trainer.checkpoint_callback.best_model_path,
             **_LightningModule.parse_config(model_config),
         )

@@ -6,12 +6,12 @@ from pathlib import Path
 import argparse
 
 parser = argparse.ArgumentParser(description="Run inference with NAM model checkpoint.")
-parser.add_argument("--input-path", type=Path, help="Input audio file path")
+parser.add_argument("--input-path", type=Path, required=True, help="Input audio file path")
 parser.add_argument("--output-dir", type=Path, default=".", help="Output directory")
 parser.add_argument("--output-name", type=Path, default="output.wav", help="Output audio file name")
 parser.add_argument("--g-vector", type=float, nargs="+", default=[0.5, 0.5, 0.5, 0.5, 0.5, 0.5], help="Global condition vector")
 parser.add_argument("--model-config-path", type=Path, default="default_config_files/models/wavenet.json", help="Model config path")
-parser.add_argument("--ckpt-path", type=Path, default="demo_ckpt.ckpt", help="Checkpoint path")
+parser.add_argument("--ckpt-path", type=Path, required=True, help="Checkpoint path")
 args = parser.parse_args()
 
 INPUT_AUDIO_PATH = args.input_path
@@ -27,10 +27,10 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 with open(MODEL_CONFIG_PATH, "r") as fp:
     model_config = _json.load(fp)
-model = _LightningModule.load_from_checkpoint(
-            CKPT_PATH,
-            **_LightningModule.parse_config(model_config)
-        )
+model = _LightningModule.load_from_safe_checkpoint(
+    CKPT_PATH,
+    **_LightningModule.parse_config(model_config)
+)
 model.eval()
 model = model.to(device)
 

@@ -23,6 +23,7 @@ from nam.data import (
     init_dataset as _init_dataset,
 )
 from nam.train.lightning_module import LightningModule as _LightningModule
+from nam.train.checkpoint import validated_trainer_options as _validated_trainer_options
 from nam.util import filter_warnings as _filter_warnings
 
 _torch.manual_seed(0)
@@ -195,10 +196,18 @@ def main(
         dataset_validation, **learning_config["val_dataloader"]
     )
     
+    trainer_options = _validated_trainer_options(
+        learning_config["trainer"],
+        context="learning_config.trainer",
+    )
+    trainer_fit_kwargs = _validated_trainer_options(
+        learning_config.get("trainer_fit_kwargs", {}),
+        context="learning_config.trainer_fit_kwargs",
+    )
     trainer = _pl.Trainer(
         callbacks=_create_callbacks(learning_config, threshold_esr=threshold_esr),
         default_root_dir=outdir,
-        **learning_config["trainer"],
+        **trainer_options,
     )
 
     with _filter_warnings("ignore", category=_PossibleUserWarning):
@@ -206,12 +215,12 @@ def main(
             model,
             train_dataloader,
             val_dataloader,
-            **learning_config.get("trainer_fit_kwargs", {}),
+            **trainer_fit_kwargs,
         )
     # Go to best checkpoint
     best_checkpoint = trainer.checkpoint_callback.best_model_path
     if best_checkpoint != "":
-        model = _LightningModule.load_from_checkpoint(
+        model = _LightningModule.load_from_safe_checkpoint(
             trainer.checkpoint_callback.best_model_path,
             **_LightningModule.parse_config(model_config),
         )
@@ -235,6 +244,4 @@ def main(
 
 
     return best_checkpoint
-
-
 

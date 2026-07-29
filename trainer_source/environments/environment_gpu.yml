@@ -19,20 +19,19 @@ dependencies:
   - pydantic>=2
   - pytest
   - pytest-mock
-  - pytorch::pytorch
-  # If your GPU isn't being detected, you may need a different version.
-  # You're going to need to look at Table 3 here: 
-  # https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html#cuda-major-component-versions__table-cuda-toolkit-driver-versions
-  - pytorch::pytorch-cuda=12.1  # GPU
   - semver
   - tensorboard
   - tqdm
   - wheel
   - pip:
+      # PyTorch 2.6+ is required for safe weights-only checkpoint loading.
+      # Official 2.6 binaries moved from Conda to wheels.
+      - --extra-index-url https://download.pytorch.org/whl/cu124
+      - torch==2.6.0
       - auraloss==0.3.0
       - pytorch_lightning
       - sounddevice
       - transformers>=4  # See requirements.txt
       - wavio >=0.0.5
-      - torchaudio
+      - torchaudio==2.6.0
       - -e ..

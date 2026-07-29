@@ -103,7 +103,10 @@ if __name__ == "__main__":
         "--checkpoint-path",
         type=str,
         default=None,
-        help="Path to a checkpoint file to resume training from. If provided, the training will continue from this checkpoint."
+        help=(
+            "Initialize from checkpoint model weights. Optimizer, scheduler, "
+            "and training-loop state are not resumed."
+        )
     )
     parser.add_argument(
         "--threshold-esr",

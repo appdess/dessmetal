@@ -5,6 +5,7 @@ import json as _json
 from nam.util import timestamp as _timestamp
 from nam.train.full import _create_callbacks
 from nam.train.lightning_module import LightningModule as _LightningModule
+from nam.train.checkpoint import validated_trainer_options as _validated_trainer_options
 from nam.data import Split as _Split, init_dataset as _init_dataset, wav_to_tensor as _wav_to_tensor
 from torch.utils.data import DataLoader as _DataLoader, TensorDataset as _TensorDataset
 import pytorch_lightning as _pl
@@ -59,11 +60,20 @@ def train_ensemble_member(rank, model_config, aggregated_data_config, learning_c
     model.net.sample_rate = dataset_validation.sample_rate
     
     aggregated_dataset = _init_dataset(aggregated_data_config, _Split.TRAIN)
-    learning_config["trainer"].pop("devices")
+    trainer_options = dict(learning_config["trainer"])
+    trainer_options.pop("devices", None)
+    trainer_options = _validated_trainer_options(
+        trainer_options,
+        context="learning_config.trainer",
+    )
+    trainer_fit_kwargs = _validated_trainer_options(
+        learning_config.get("trainer_fit_kwargs", {}),
+        context="learning_config.trainer_fit_kwargs",
+    )
     trainer = _pl.Trainer(
         callbacks=_create_callbacks(learning_config),
         default_root_dir=root_dir,
-        **learning_config["trainer"],
+        **trainer_options,
         devices=[rank],
         enable_progress_bar=True
     )
@@ -81,7 +91,7 @@ def train_ensemble_member(rank, model_config, aggregated_data_config, learning_c
             model,
             train_dataloader,
             val_dataloader,
-            **learning_config.get("trainer_fit_kwargs", {})
+            **trainer_fit_kwargs
         )
 
     trainer.save_checkpoint(ckpt_path)
@@ -415,7 +425,10 @@ if __name__ == "__main__":
         ckpt_path = ckpt_paths[rank]
         if not _os.path.exists(ckpt_path):
             raise RuntimeError(f"Checkpoint {ckpt_path} does not exist")
-        model = _LightningModule.load_from_checkpoint(ckpt_path, **_LightningModule.parse_config(model_config))
+        model = _LightningModule.load_from_safe_checkpoint(
+            ckpt_path,
+            **_LightningModule.parse_config(model_config),
+        )
         model.to(f"cuda:{rank}")
         # Set model to train mode for g optimization. 
         # The model will not be updated, but the CuDNN backend for RNNs requires it.
@@ -455,11 +468,20 @@ if __name__ == "__main__":
     ]
     active_learning_inputs_dir = _Path(outdir, f"active_learning_inputs")
     _os.makedirs(active_learning_inputs_dir, exist_ok=True)
-    aggregated_data_config["train"]["outputs"] = aggregated_data_config["train"]["outputs"] + [{"g_vector": item["g_vector"], "y_path": f"{active_learning_inputs_dir}/{item["index"]:04d}.wav"} for item in new_config_parts]
+    aggregated_data_config["train"]["outputs"] = aggregated_data_config["train"]["outputs"] + [
+        {
+            "g_vector": item["g_vector"],
+            "y_path": f"{active_learning_inputs_dir}/{item['index']:04d}.wav",
+        }
+        for item in new_config_parts
+    ]
 
     prompt = (
         f"Please provide {len(new_config_parts)} input audio files in {active_learning_inputs_dir} for the selected g's:\n"
-        + "\n".join([f"{item["index"]:04d}.wav: {item["g_vector"]}" for item in new_config_parts]) 
+        + "\n".join(
+            f"{item['index']:04d}.wav: {item['g_vector']}"
+            for item in new_config_parts
+        )
         + "\n\n"
     )
     print(prompt)
@@ -484,4 +506,3 @@ if __name__ == "__main__":
     plt.ylabel('Frequency')
     plt.grid(axis='y', alpha=0.75)
     plt.savefig(outdir / _Path(f"round{CURRENT_ROUND_IDX} plots") / _Path(f"g_vector_distribution.png"))
-

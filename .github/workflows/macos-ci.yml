@@ -62,8 +62,10 @@ jobs:
       - name: Versioned state-layout migration tests
         run: bash NeuralAmpModeler/tests/run_unserialization_layout_tests.sh
 
-      - name: Cloud trainer path-safety tests
-        run: python3 -m unittest discover -s trainer_source/cloud/tests -p 'test_*.py'
+      - name: Python trainer security regression tests
+        run: |
+          python3 -m unittest discover -s trainer_source/cloud/tests -p 'test_*.py'
+          python3 -m unittest discover -s trainer_source/tests -p 'test_*.py'
 
       - name: Core and parametric model tests
         working-directory: NeuralAmpModelerCore
