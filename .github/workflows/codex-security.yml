@@ -262,7 +262,7 @@ jobs:
           EXPECTED = {
               "iss": "https://token.actions.githubusercontent.com",
               "aud": "https://api.openai.com/v1",
-              "sub": "repo:appdess/dessmetal:environment:codex-security-release",
+              "sub": "repo:appdess@33653533/dessmetal@1316019438:environment:codex-security-release",
               "repository": "appdess/dessmetal",
               "repository_id": "1316019438",
               "repository_owner_id": "33653533",
