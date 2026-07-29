@@ -100,26 +100,28 @@ a formal penetration test.
 - The current product loads only its fixed bundled NAM allowlist. Arbitrary custom-NAM import must not be restored
   until JSON bytes/depth/dimensions, convolution groups, and expected weight counts are bounded and malformed model
   inputs are fuzzed.
-- GitHub Actions run `30451268583` passed arm64 and x86_64 for fix-introducing commit `a075999`. The final tagged
-  descendant and its own CI evidence must be identified in the release body.
-- The owner has declared all NAM and IR captures first-party and approved their inclusion. Exact public
-  redistribution/license terms remain blank in the owner-review sheet and are still a public-release gate. The owner
-  also identified
+- GitHub Actions run `30451268583` passed arm64 and x86_64 for fix-introducing commit `a075999`; final run
+  `30454055926` passed both architectures for tagged release commit `a3d57e6`. The release body identifies that run,
+  final artifact hashes, and Apple submission `f65db216-98ac-433c-b389-5a42edb033d5`.
+- The owner has declared all NAM and IR captures first-party, approved their inclusion, and on 2026-07-29 explicitly
+  authorized public distribution of the shipped v0.1.1 asset set through this repository and release. This does not
+  relicense the captures or artwork under MIT. The owner also identified
   the former OD808/SD1 `modeled_by: jpisoutoftune` and placeholder `gear_type`/`gear_make`/`gear_model` fields as
   incorrect; only those optional values were cleared to `null`, and byte-level verification confirms unchanged model
-  weights and unrelated data. Public release also remains blocked on artwork/app-icon terms and promotion of the
-  updated exact-hash inventory into an approved release manifest.
+  weights and unrelated data. The released artwork is covered by the owner's explicit v0.1.1 distribution direction
+  above, while a file-level author/provenance record remains a post-release documentation follow-up.
 - Capture-lineage claims are intentionally limited: DessBlock Green is the owner's Peavey 5150 green-channel
   capture; SickDess is the owner's Krank Revolution capture; DessTortion Blue/Red are current voicings in the
   historically EVH 5150 Stealth-based family but are not separately attributed to exact hardware variants.
 - The replacement passed the expanded component-policy, adversarial same-ID Upgrade, notarization, staple, and
   Gatekeeper gates. Because AU/VST3 bundles and receipts already existed, this does not prove a pristine
   uninstall/reinstall; perform that stronger owner-machine test if it remains a release requirement.
-- This checkout has a configured private GitHub `origin`, and CI passed for the fix-introducing commit.
+- This checkout has a configured public GitHub `origin`, and CI passed for the exact tagged release commit.
   Ordinary CI imports no signing/notarization credentials; the separate release workflow targets an environment that
   the repository owner must configure with required reviewers and requires explicit sign, notarize, or verified-draft
-  dispatch plus a separate operation-specific artifact-transfer phrase. Record the final exact tagged commit and CI
-  result, envelope hashes, and transfer evidence in the GitHub release body/manifest.
-- The owner has authorized the v0.1.1 tag, assets, and release in the existing private repository. Public asset terms,
-  support/security contact readiness, the controlled listening decision, and any change to public visibility remain
-  separate gates; no private-release authorization implies permission to make the repository or release public.
+  dispatch plus a separate operation-specific artifact-transfer phrase. The final exact tagged commit, CI result,
+  envelope hashes, and transfer evidence are recorded in the GitHub release body and release manifest.
+- The owner explicitly authorized and completed public visibility for the v0.1.1 repository, tag, assets, and release.
+  File-level UI/app-icon provenance, a private security-reporting route, controlled listening notes, and every future
+  tag, artifact upload, release, or visibility change remain separate follow-ups requiring their own evidence or
+  approval.

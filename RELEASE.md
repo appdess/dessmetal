@@ -6,7 +6,7 @@ The results below apply to the 0.1.1 product source and the locally staged bundl
 described below. Detailed UI/control evidence came from the exact AU in a view-only validation host; audio-device
 startup and real-host load/playback/save-reopen evidence came separately from the exact standalone and Logic Pro AU.
 No 0.1.0 result is substituted for an exact-current gate. The non-relocatable installer correction was introduced by
-commit `a075999`, and the source is available in the private GitHub review repository. The final exact tagged commit
+commit `a075999`, and the source is available in the public GitHub repository. The final exact tagged commit
 and its CI run, envelope hashes, and full Apple/install evidence records belong in the matching GitHub release body
 and generated release manifest rather than inside the documentation packaged by the artifact itself.
 
@@ -53,10 +53,10 @@ a pristine uninstall/reinstall test.
 | Standalone | Pass | Exact installed replacement app launched and showed its native UI; prior exact staged app also passed CoreAudio startup without a new HAL timeout after the audio-service reset |
 | Logic Pro 11.2.2 | Pass | Exact AU discovery, instantiation, native UI, finite/non-silent playback, active/bypass interaction, save/reopen persistence |
 | Package pipeline | Pass | Replacement APP/AU/VST3/PKG passed Developer ID identity/signature and fixed-destination/non-relocation checks; installed bundles later byte-matched the package payload |
-| GitHub Actions | Fix-introducing commit passed | Run `30451268583` passed arm64 and x86_64 for `a075999`; record the final tagged commit's own CI evidence in the release body |
+| GitHub Actions | Final release commit passed | Run `30454055926` passed arm64 and x86_64 for tagged commit `a3d57e6` |
 | Signed install | Pass as Upgrade | Same-ID staging app remained present; Installer placed the app in `/Applications` without a relocation log entry, installed bundles byte-matched payload, and the app launched with native UI visible |
-| Apple notarization | Pass | Submission `de6a28a0-7ae7-4534-9804-e64e0690a65c` was accepted; staple and Gatekeeper DMG/nested-PKG assessments passed |
-| Release-envelope record and private publication | Authorized/manual | Record the final tagged commit, matching CI run, exact hashes, and install evidence in the private GitHub release body/manifest; public visibility remains separate |
+| Apple notarization | Pass | Final submission `f65db216-98ac-433c-b389-5a42edb033d5` was accepted; staple and Gatekeeper DMG/nested-PKG assessments passed |
+| Public v0.1.1 release | Pass | Tag `v0.1.1` and its signed, notarized six-file macOS set are published from the exact release commit; the release body records final CI, hashes, Apple submission, and install evidence |
 
 ## Compatibility and state
 
@@ -141,10 +141,11 @@ The former OD808/SD1 `modeled_by: jpisoutoftune` and placeholder gear fields wer
 those optional values were cleared to null; trained weights, model configuration, paths, and host order are
 unchanged.
 
-The declaration approving inclusion is recorded separately from the root MIT source-code license. Exact public
-redistribution terms for NAM/IR binaries, file-level UI/app-icon artwork ownership and terms, and an approved
-exact-hash asset manifest remain owner gates. Capture descriptions are descriptive only; trademarks belong to their
-respective owners, and no affiliation or endorsement is claimed.
+The declaration approving inclusion is recorded separately from the root MIT source-code license. On 2026-07-29,
+the owner explicitly authorized public distribution of the shipped v0.1.1 asset set through this repository and its
+GitHub release. That authorization does not place NAM/IR binaries or artwork under MIT, establish third-party rights,
+or replace the need to document the source and redistribution terms of future asset changes. Capture descriptions
+are descriptive only; trademarks belong to their respective owners, and no affiliation or endorsement is claimed.
 
 ## CI and release boundaries
 
@@ -171,16 +172,15 @@ The protected environment supplies these secrets only to the matching release jo
 - `DESSMETAL_NOTARY_ISSUER_ID` for a Team API key. Leave the issuer secret unset for an Individual API key.
 
 Validation runs natively on both GitHub's `macos-15` arm64 runner and `macos-15-intel` x86_64 runner. Each runner
-executes strict/stress AU checks plus the Steinberg validator's standard and extensive suites. Run `30451268583`
-passed both runners for the fix-introducing commit `a075999`; the final tagged descendant and its own CI evidence must
-be identified in the release body. Notarization assessed the exact inner PKG. The completed privileged installer
-regression was an Upgrade with existing AU/VST3 receipts, not a pristine uninstall/reinstall.
+executes strict/stress AU checks plus the Steinberg validator's standard and extensive suites. Run `30454055926`
+passed both runners for tagged release commit `a3d57e6`; the matching release body records that run. Notarization
+assessed the exact inner PKG. The completed privileged installer regression was an Upgrade with existing AU/VST3
+receipts, not a pristine uninstall/reinstall.
 
-Publication remains a distinct manual GitHub action. The private review repository is
-`https://github.com/appdess/dessmetal`, and `origin/main` is the source-review branch. The fix-introducing commit and
-its CI run are recorded above; the final exact tagged commit, its CI result, envelope hashes, and transfer/install
-evidence must be recorded in the matching GitHub release body and generated manifest. The owner has authorized the
-v0.1.1 release in this existing private repository; changing repository or release visibility remains separate.
+Publication remains a distinct manual GitHub action. The public repository is
+`https://github.com/appdess/dessmetal`, and `origin/main` is the development branch. Release `v0.1.1` is published
+from exact commit `a3d57e6`; its release body records the matching CI run, envelope hashes, Apple submission, and
+install evidence. Future tags, artifacts, releases, or visibility changes still require explicit owner approval.
 GitLab validation imports no signing/notarization credentials, while its signed release job is manual and tag-only.
 
 The local Xcode toolchain's AddressSanitizer runtime was independently reproduced hanging before `main()` even for a
@@ -188,22 +188,18 @@ hello-world binary. The complete WAV corpus passed AddressSanitizer plus Undefin
 Apple Command Line Tools clang 21. A real GitHub macOS 15 workflow run remains useful CI evidence, but is no longer
 the only sanitizer coverage.
 
-## Remaining release gates
+## Post-release follow-ups
 
-1. Approve exact public redistribution terms for every shipped NAM and IR, plus file-level UI/app-icon artwork
-   provenance and terms; promote the owner review sheet into the release manifest.
-2. Complete the owner's controlled listening decision, including the red-model ESR 0.01575 checkbox.
-3. Configure a working public support route and a private vulnerability-reporting route, then replace the currently
-   unresolved plug-in/installer contact metadata before distribution.
-4. If the owner requires a pristine first-install result, remove the existing installed bundles and receipts through
+1. Add a file-level author/provenance record for the shipped UI and app-icon artwork; require exact origin and
+   redistribution terms for every future model, IR, image, font, or icon change.
+2. Complete the owner's controlled listening notes, including the red-model ESR 0.01575 item; keep the metric
+   separate from any subjective sound-quality claim.
+3. Add a private vulnerability-reporting route. Public support and collaboration use GitHub Issues.
+4. If a pristine first-install result is desired, remove the existing installed bundles and receipts through
    the approved uninstall path, then repeat the exact installer test. The completed adversarial Upgrade proves the
    relocation correction but is not a pristine uninstall/reinstall.
-5. Put the final exact tagged commit, its successful CI run, exact envelope hashes, Apple result, and install evidence
-   in the matching GitHub release body and generated manifest, then verify that every release asset matches them.
-6. Configure required reviewers on the GitHub `macos-release` environment and review each dispatch input and
+5. Configure required reviewers on the GitHub `macos-release` environment and review each dispatch input and
    transfer-confirmation phrase before any later release-workflow operation.
-7. Complete the already-authorized v0.1.1 tag/draft/publication only in the existing private repository. Do not make
-   the repository or release public until the asset-term gate is closed and public visibility is explicitly approved.
 
 An unnotarized Developer ID candidate is for owner review, not a finished shareable macOS release.
 
@@ -222,11 +218,11 @@ An unnotarized Developer ID candidate is for owner review, not a finished sharea
 7. While a same-bundle-ID app copy exists outside `/Applications`, install the exact signed package and verify
    `/Applications/DessMetal.app`, the two fixed system plug-in destinations, receipts, and the absence of PackageKit
    relocation in the new `/var/log/install.log` interval.
-8. Complete the asset and controlled-listening owner gates.
+8. For future releases or changed assets, complete the applicable provenance and controlled-listening review.
 9. Ask for approval of the exact replacement signed DMG hash before submitting it to Apple.
 10. Run `DESSMETAL_NOTARY_PROFILE=existing-profile ./notarize_mac.sh <approved-dmg-sha256>`, then record the
     replacement post-staple DMG hash and repeat Gatekeeper and the adversarial clean-install checks.
-11. Complete v0.1.1 artifact upload, tag, draft, and publication only in the existing private repository under the
-    current authorization. Require separate approval before public visibility or any future release operation.
+11. Publish only after the exact tag, CI run, notarization, asset digests, and release body agree. Require separate
+    approval for every future tag, artifact upload, release publication, or visibility change.
 
 No release script accepts legal terms, creates credentials, modifies a Developer account, or publishes a release.

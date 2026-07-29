@@ -1,9 +1,9 @@
 # Contributing to DessMetal
 
-Coordinate with the project owner before starting a large feature. Current collaborators can use the private project
-tracker; a public contribution tracker will be linked when the repository is published. Keep changes focused and do
-not add model, IR, font, or artwork files without documenting their origin, copyright owner, and redistribution
-license.
+Coordinate with the project owner before starting a large feature. Use
+[GitHub Issues](https://github.com/appdess/dessmetal/issues) for bugs, proposals, and contribution coordination.
+Keep changes focused and do not add model, IR, font, or artwork files without documenting their origin, copyright
+owner, and redistribution license.
 
 Before proposing a change, run:
 
