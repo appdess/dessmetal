@@ -1,6 +1,8 @@
 #include "conv1d.h"
 #include <stdexcept>
 
+#include "model_validation.h"
+
 namespace nam
 {
 // Conv1D =====================================================================
@@ -40,17 +42,15 @@ void Conv1D::set_weights_(std::vector<float>::iterator& weights)
 void Conv1D::set_size_(const int in_channels, const int out_channels, const int kernel_size, const bool do_bias,
                        const int _dilation, const int groups)
 {
-  // Validate that channels divide evenly by groups
-  if (in_channels % groups != 0)
-  {
-    throw std::runtime_error("in_channels (" + std::to_string(in_channels) + ") must be divisible by numGroups ("
-                             + std::to_string(groups) + ")");
-  }
-  if (out_channels % groups != 0)
-  {
-    throw std::runtime_error("out_channels (" + std::to_string(out_channels) + ") must be divisible by numGroups ("
-                             + std::to_string(groups) + ")");
-  }
+  model_validation::require_grouped_channels(in_channels, out_channels, groups, "Conv1D");
+  const auto kernel_count = model_validation::positive_dimension(kernel_size, "kernel_size");
+  model_validation::positive_dimension(_dilation, "dilation");
+  const auto dense_values = model_validation::checked_multiply(
+    kernel_count,
+    model_validation::checked_multiply(
+      static_cast<std::size_t>(in_channels), static_cast<std::size_t>(out_channels), "Conv1D dense storage"),
+    "Conv1D dense storage");
+  model_validation::require_dense_layer_limit(dense_values, "Conv1D");
 
   this->_num_groups = groups;
   this->_weight.resize(kernel_size);

@@ -98,6 +98,9 @@ public:
   /// \return Number of output channels
   int NumOutputChannels() const { return mOutChannels; };
 
+  /// Conservative estimate used to bound nested-model prewarm work.
+  virtual std::size_t EstimatedOperationsPerSample() const { return 1U; }
+
   /// \brief Get the input level
   ///
   /// Input level is in dBu RMS, corresponding to 0 dBFS peak for a 1 kHz sine wave.
@@ -268,6 +271,13 @@ public:
   /// \param output Output audio buffers
   /// \param num_frames Number of frames to process
   void process(NAM_SAMPLE** input, NAM_SAMPLE** output, const int num_frames) override;
+
+  std::size_t EstimatedOperationsPerSample() const override
+  {
+    const std::size_t processed_channels = static_cast<std::size_t>(
+      NumInputChannels() < NumOutputChannels() ? NumInputChannels() : NumOutputChannels());
+    return static_cast<std::size_t>(_receptive_field) * processed_channels;
+  }
 
 protected:
   Eigen::VectorXf _weight;

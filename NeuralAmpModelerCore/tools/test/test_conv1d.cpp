@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <stdexcept>
 #include <vector>
 
 #include "NAM/conv1d.h"
@@ -29,6 +30,34 @@ void test_construct_with_shape()
   assert(conv.get_out_channels() == 3);
   assert(conv.get_kernel_size() == 5);
   assert(conv.has_bias());
+}
+
+void test_construct_rejects_zero_groups()
+{
+  bool threw = false;
+  try
+  {
+    nam::Conv1D conv(4, 4, 1, false, 1, 0);
+  }
+  catch (const std::invalid_argument&)
+  {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void test_construct_rejects_dense_grouped_amplification()
+{
+  bool threw = false;
+  try
+  {
+    nam::Conv1D conv(5000, 5000, 1, false, 1, 5000);
+  }
+  catch (const std::invalid_argument&)
+  {
+    threw = true;
+  }
+  assert(threw);
 }
 
 // Test set_size_ and getters

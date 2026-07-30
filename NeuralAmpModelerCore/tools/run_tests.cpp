@@ -43,8 +43,8 @@ int main()
 
   test_activations::TestPReLU::test_core_function();
   test_activations::TestPReLU::test_per_channel_behavior();
-  // This is enforced by an assert so it doesn't need to be tested
-  // test_activations::TestPReLU::test_wrong_number_of_channels();
+  test_activations::TestPReLU::test_single_slope_broadcast();
+  test_activations::TestPReLU::test_wrong_number_of_channels();
 
   // Typed ActivationConfig tests
   test_activations::TestTypedActivationConfig::test_simple_config();
@@ -56,6 +56,7 @@ int main()
   test_activations::TestTypedActivationConfig::test_from_json_string();
   test_activations::TestTypedActivationConfig::test_from_json_object();
   test_activations::TestTypedActivationConfig::test_from_json_prelu_multi();
+  test_activations::TestTypedActivationConfig::test_rejects_excessive_or_nonfinite_prelu_slopes();
   test_activations::TestTypedActivationConfig::test_unknown_activation_throws();
 
   test_dsp::test_construct();
@@ -78,6 +79,8 @@ int main()
   test_ring_buffer::test_rewind_preserves_history();
 
   test_conv1d::test_construct();
+  test_conv1d::test_construct_rejects_zero_groups();
+  test_conv1d::test_construct_rejects_dense_grouped_amplification();
   test_conv1d::test_set_size();
   test_conv1d::test_reset();
   test_conv1d::test_process_basic();
@@ -99,6 +102,8 @@ int main()
 
   test_conv_1x1::test_construct();
   test_conv_1x1::test_construct_with_groups();
+  test_conv_1x1::test_construct_validation_zero_groups();
+  test_conv_1x1::test_construct_validation_dense_grouped_amplification();
   test_conv_1x1::test_construct_validation_in_channels();
   test_conv_1x1::test_construct_validation_out_channels();
   test_conv_1x1::test_process_basic();
@@ -145,6 +150,12 @@ int main()
   test_wavenet::test_full::test_wavenet_zero_input();
   test_wavenet::test_full::test_wavenet_different_buffer_sizes();
   test_wavenet::test_full::test_wavenet_prewarm();
+  test_wavenet::test_full::test_wavenet_exact_weight_count_includes_all_films();
+  test_wavenet::test_full::test_wavenet_rejects_short_and_surplus_weights();
+  test_wavenet::test_full::test_wavenet_rejects_invalid_groups_dilations_and_gating();
+  test_wavenet::test_full::test_wavenet_rejects_input_condition_and_head_chain_mismatches();
+  test_wavenet::test_full::test_wavenet_rejects_head_film_without_head_projection();
+  test_wavenet::test_full::test_wavenet_counts_nested_linear_prewarm_compute();
   test_wavenet::test_head1x1::test_head1x1_inactive();
   test_wavenet::test_head1x1::test_head1x1_active();
   test_wavenet::test_head1x1::test_head1x1_gated();
@@ -176,6 +187,9 @@ int main()
   test_convnet::test_convnet_different_buffer_sizes();
   test_convnet::test_convnet_prewarm();
   test_convnet::test_convnet_multiple_calls();
+  test_convnet::test_convnet_grouped_weight_count();
+  test_convnet::test_convnet_rejects_short_and_surplus_weights();
+  test_convnet::test_convnet_rejects_malformed_dimensions();
 
   // LSTM tests
   test_lstm::test_lstm_basic();
@@ -189,6 +203,9 @@ int main()
   test_lstm::test_lstm_different_input_size();
   test_lstm::test_lstm_state_evolution();
   test_lstm::test_lstm_no_layers();
+  test_lstm::test_lstm_input_size_can_exceed_channel_count();
+  test_lstm::test_lstm_rejects_short_and_surplus_weights();
+  test_lstm::test_lstm_rejects_malformed_dimensions();
 
   // Gating activations tests
   test_gating_activations::TestGatingActivation::test_basic_functionality();
@@ -222,6 +239,19 @@ int main()
   test_get_dsp::test_gets_output_level();
   test_get_dsp::test_null_input_level();
   test_get_dsp::test_null_output_level();
+  test_get_dsp::test_missing_metadata_is_optional();
+  test_get_dsp::test_missing_required_top_level_field_throws();
+  test_get_dsp::test_rejects_unsafe_numeric_metadata();
+  test_get_dsp::test_null_sample_rate_is_unknown();
+  test_get_dsp::test_rejects_non_integer_architecture_dimensions();
+  test_get_dsp::test_rejects_unsafe_linear_resources_before_allocation();
+  test_get_dsp::test_rejects_unsafe_aggregate_prewarm_buffers();
+  test_get_dsp::test_rejects_excessive_lstm_depth();
+  test_get_dsp::test_rejects_excessive_convolution_prewarm_work();
+  test_get_dsp::test_rejects_width_amplified_prewarm_compute();
+  test_get_dsp::test_rejects_nonfinite_weights_and_invalid_metadata_shape();
+  test_get_dsp::test_rejects_excessive_nested_condition_models();
+  test_get_dsp::test_rejects_mismatched_prelu_channels();
 
   // Finally, some end-to-end tests.
   test_get_dsp::test_load_and_process_nam_files();

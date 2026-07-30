@@ -3,13 +3,53 @@
 #include <cmath> // pow, tanh, expf
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 
 #include "dsp.h"
+#include "model_validation.h"
 #include "registry.h"
 #include "convnet.h"
+
+namespace
+{
+constexpr std::size_t kMaxConvNetPrewarmSamples = 1U << 20;
+constexpr std::size_t kMaxConvNetPrewarmWork = 64U << 20;
+constexpr std::size_t kMaxConvNetBufferValues = 16U << 20;
+constexpr std::size_t kMaxConvNetDenseValues = 32U << 20;
+constexpr std::size_t kMaxConvNetRuntimeValues = 64U << 20;
+constexpr std::size_t kValidationBufferFrames = 4096;
+
+std::size_t estimate_convnet_operations_per_sample(const int in_channels, const int out_channels,
+                                                    const int channels, const std::size_t layer_count)
+{
+  using nam::model_validation::checked_add;
+  using nam::model_validation::checked_multiply;
+
+  const auto input_channels = static_cast<std::size_t>(in_channels);
+  const auto output_channels = static_cast<std::size_t>(out_channels);
+  const auto hidden_channels = static_cast<std::size_t>(channels);
+  std::size_t dense_values = checked_multiply(
+    2U, checked_multiply(hidden_channels, input_channels, "ConvNet dense storage"), "ConvNet dense storage");
+  if (layer_count > 1U)
+  {
+    dense_values = checked_add(
+      dense_values,
+      checked_multiply(
+        layer_count - 1U,
+        checked_multiply(
+          2U, checked_multiply(hidden_channels, hidden_channels, "ConvNet dense storage"),
+          "ConvNet dense storage"),
+        "ConvNet dense storage"),
+      "ConvNet dense storage");
+  }
+  return checked_add(
+    dense_values, checked_multiply(output_channels, hidden_channels, "ConvNet dense storage"),
+    "ConvNet dense storage");
+}
+}
 
 nam::convnet::BatchNorm::BatchNorm(const int dim, std::vector<float>::iterator& weights)
 {
@@ -177,9 +217,12 @@ nam::convnet::ConvNet::ConvNet(const int in_channels, const int out_channels, co
                                const std::vector<int>& dilations, const bool batchnorm,
                                const activations::ActivationConfig& activation_config, std::vector<float>& weights,
                                const double expected_sample_rate, const int groups)
-: Buffer(in_channels, out_channels, *std::max_element(dilations.begin(), dilations.end()), expected_sample_rate)
+: Buffer(in_channels, out_channels,
+         _verify_weights(in_channels, out_channels, channels, dilations, batchnorm, groups, weights.size()),
+         expected_sample_rate)
 {
-  this->_verify_weights(channels, dilations, batchnorm, weights.size());
+  this->mEstimatedOperationsPerSample =
+    estimate_convnet_operations_per_sample(in_channels, out_channels, channels, dilations.size());
   this->_blocks.resize(dilations.size());
   std::vector<float>::iterator it = weights.begin();
   // First block takes in_channels input, subsequent blocks take channels input
@@ -277,10 +320,119 @@ void nam::convnet::ConvNet::process(NAM_SAMPLE** input, NAM_SAMPLE** output, con
   nam::Buffer::_advance_input_buffer_(num_frames);
 }
 
-void nam::convnet::ConvNet::_verify_weights(const int channels, const std::vector<int>& dilations, const bool batchnorm,
-                                            const size_t actual_weights)
+int nam::convnet::ConvNet::_verify_weights(const int in_channels, const int out_channels, const int channels,
+                                           const std::vector<int>& dilations, const bool batchnorm, const int groups,
+                                           const size_t actual_weights)
 {
-  // TODO
+  using model_validation::checked_add;
+  using model_validation::checked_multiply;
+  using model_validation::positive_dimension;
+
+  const std::size_t input_channels = positive_dimension(in_channels, "ConvNet in_channels");
+  const std::size_t output_channels = positive_dimension(out_channels, "ConvNet out_channels");
+  const std::size_t hidden_channels = positive_dimension(channels, "ConvNet channels");
+  const std::size_t group_count = positive_dimension(groups, "ConvNet groups");
+  model_validation::require_grouped_channels(in_channels, channels, groups, "ConvNet first layer");
+
+  if (dilations.empty())
+    throw std::invalid_argument("ConvNet dilations must not be empty");
+
+  std::size_t max_dilation = 0;
+  std::size_t prewarm_samples = 1;
+  for (const int dilation : dilations)
+  {
+    const std::size_t value = positive_dimension(dilation, "ConvNet dilation");
+    max_dilation = std::max(max_dilation, value);
+    prewarm_samples = checked_add(prewarm_samples, value, "ConvNet prewarm");
+  }
+
+  // Buffer currently reserves 32 times the receptive field using int
+  // arithmetic. Reject a model that would overflow that calculation before
+  // entering Buffer's constructor.
+  const std::size_t max_safe_dilation =
+    static_cast<std::size_t>(std::numeric_limits<int>::max()) / 32U;
+  if (max_dilation > max_safe_dilation)
+    throw std::invalid_argument("ConvNet dilation is too large");
+  if (prewarm_samples > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+    throw std::invalid_argument("ConvNet prewarm size overflows int");
+  const std::size_t input_buffer_values = checked_multiply(
+    input_channels, checked_multiply(32U, max_dilation, "ConvNet input buffer"), "ConvNet input buffer");
+  if (prewarm_samples > kMaxConvNetPrewarmSamples || input_buffer_values > kMaxConvNetBufferValues)
+    throw std::invalid_argument("ConvNet buffer exceeds the supported resource limit");
+  const std::size_t prewarm_work =
+    checked_multiply(dilations.size(), prewarm_samples, "ConvNet prewarm work");
+  if (prewarm_work > kMaxConvNetPrewarmWork)
+    throw std::invalid_argument("ConvNet prewarm work exceeds the supported resource limit");
+
+  const std::size_t dense_values =
+    estimate_convnet_operations_per_sample(in_channels, out_channels, channels, dilations.size());
+  if (dense_values > kMaxConvNetDenseValues)
+    throw std::invalid_argument("ConvNet dense storage exceeds the supported resource limit");
+  const std::size_t prewarm_compute =
+    checked_multiply(dense_values, prewarm_samples, "ConvNet prewarm compute");
+  if (prewarm_compute > model_validation::kMaxPrewarmComputeOperations)
+    throw std::invalid_argument("ConvNet prewarm compute exceeds the supported resource limit");
+
+  const std::size_t base_buffer_columns = checked_multiply(
+    2U, checked_add(max_dilation, 32U * kValidationBufferFrames, "ConvNet runtime storage"),
+    "ConvNet runtime storage");
+  std::size_t runtime_values = checked_multiply(
+    checked_add(input_channels, hidden_channels, "ConvNet runtime storage"), base_buffer_columns,
+    "ConvNet runtime storage");
+  for (std::size_t layer = 0; layer < dilations.size(); ++layer)
+  {
+    const std::size_t layer_inputs = layer == 0U ? input_channels : hidden_channels;
+    const std::size_t history_values = checked_multiply(
+      2U, checked_multiply(layer_inputs, static_cast<std::size_t>(dilations[layer]), "ConvNet runtime storage"),
+      "ConvNet runtime storage");
+    const std::size_t frame_rows = checked_add(
+      layer_inputs, checked_multiply(3U, hidden_channels, "ConvNet runtime storage"),
+      "ConvNet runtime storage");
+    runtime_values = checked_add(runtime_values, history_values, "ConvNet runtime storage");
+    runtime_values = checked_add(
+      runtime_values, checked_multiply(frame_rows, kValidationBufferFrames, "ConvNet runtime storage"),
+      "ConvNet runtime storage");
+  }
+  runtime_values = checked_add(
+    runtime_values,
+    checked_multiply(
+      checked_add(input_channels, output_channels, "ConvNet runtime storage"), kValidationBufferFrames,
+      "ConvNet runtime storage"),
+    "ConvNet runtime storage");
+  if (runtime_values > kMaxConvNetRuntimeValues)
+    throw std::invalid_argument("ConvNet runtime storage exceeds the supported resource limit");
+
+  const std::size_t first_group_inputs = input_channels / group_count;
+  const std::size_t hidden_group_inputs = hidden_channels / group_count;
+  const std::size_t first_block_weights = checked_multiply(
+    2U, checked_multiply(hidden_channels, first_group_inputs, "ConvNet first layer"), "ConvNet first layer");
+  const std::size_t later_block_weights = checked_multiply(
+    2U, checked_multiply(hidden_channels, hidden_group_inputs, "ConvNet hidden layer"),
+    "ConvNet hidden layer");
+
+  std::size_t expected_weights = first_block_weights;
+  if (dilations.size() > 1U)
+  {
+    expected_weights = checked_add(
+      expected_weights,
+      checked_multiply(dilations.size() - 1U, later_block_weights, "ConvNet hidden layers"),
+      "ConvNet hidden layers");
+  }
+
+  const std::size_t per_block_tail = batchnorm
+    ? checked_add(checked_multiply(4U, hidden_channels, "ConvNet batch normalization"), 1U,
+                  "ConvNet batch normalization")
+    : hidden_channels;
+  expected_weights = checked_add(
+    expected_weights, checked_multiply(dilations.size(), per_block_tail, "ConvNet block parameters"),
+    "ConvNet block parameters");
+
+  const std::size_t head_weights = checked_multiply(
+    output_channels, checked_add(hidden_channels, 1U, "ConvNet head"), "ConvNet head");
+  expected_weights = checked_add(expected_weights, head_weights, "ConvNet model");
+  model_validation::require_exact_weight_count("ConvNet", expected_weights, actual_weights);
+
+  return static_cast<int>(max_dilation);
 }
 
 void nam::convnet::ConvNet::SetMaxBufferSize(const int maxBufferSize)
@@ -326,16 +478,16 @@ void nam::convnet::ConvNet::_rewind_buffers_()
 std::unique_ptr<nam::DSP> nam::convnet::Factory(const nlohmann::json& config, std::vector<float>& weights,
                                                 const double expectedSampleRate)
 {
-  const int channels = config["channels"];
-  const std::vector<int> dilations = config["dilations"];
-  const bool batchnorm = config["batchnorm"];
+  const int channels = model_validation::json_integer_at(config, "channels");
+  const std::vector<int> dilations = model_validation::json_integer_vector_at(config, "dilations");
+  const bool batchnorm = config.at("batchnorm");
   // Parse JSON into typed ActivationConfig at model loading boundary
   const activations::ActivationConfig activation_config =
-    activations::ActivationConfig::from_json(config["activation"]);
-  const int groups = config.value("groups", 1); // defaults to 1
+    activations::ActivationConfig::from_json(config.at("activation"));
+  const int groups = model_validation::json_integer_value(config, "groups", 1); // defaults to 1
   // Default to 1 channel in/out for backward compatibility
-  const int in_channels = config.value("in_channels", 1);
-  const int out_channels = config.value("out_channels", 1);
+  const int in_channels = model_validation::json_integer_value(config, "in_channels", 1);
+  const int out_channels = model_validation::json_integer_value(config, "out_channels", 1);
   return std::make_unique<nam::convnet::ConvNet>(
     in_channels, out_channels, channels, dilations, batchnorm, activation_config, weights, expectedSampleRate, groups);
 }

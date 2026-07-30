@@ -34,6 +34,34 @@ void test_construct_with_groups()
   assert(conv.get_out_channels() == out_channels);
 }
 
+void test_construct_validation_zero_groups()
+{
+  bool threw = false;
+  try
+  {
+    nam::Conv1x1 conv(4, 4, false, 0);
+  }
+  catch (const std::invalid_argument&)
+  {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void test_construct_validation_dense_grouped_amplification()
+{
+  bool threw = false;
+  try
+  {
+    nam::Conv1x1 conv(5000, 5000, false, 5000);
+  }
+  catch (const std::invalid_argument&)
+  {
+    threw = true;
+  }
+  assert(threw);
+}
+
 // Test construction validation - in_channels not divisible by groups
 void test_construct_validation_in_channels()
 {

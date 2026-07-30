@@ -2,12 +2,27 @@
 
 #include <Eigen/Dense>
 #include <cassert>
+#include <limits>
 #include <vector>
 
 #include "dsp.h"
+#include "model_validation.h"
 
 namespace nam
 {
+namespace film_detail
+{
+inline int checked_projection_size(const int input_dim, const bool shift)
+{
+  const auto result = model_validation::checked_multiply(
+    model_validation::positive_dimension(input_dim, "FiLM input dimension"), shift ? 2U : 1U,
+    "FiLM projection");
+  if (result > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+    throw std::invalid_argument("FiLM projection exceeds the supported dimension range");
+  return static_cast<int>(result);
+}
+} // namespace film_detail
+
 /// \brief Feature-wise Linear Modulation (FiLM)
 ///
 /// Given an input (input_dim x num_frames) and a condition (condition_dim x num_frames), compute:
@@ -24,7 +39,7 @@ public:
   /// \param input_dim Size of the input to be modulated
   /// \param shift Whether to apply both scale and shift (true) or only scale (false)
   FiLM(const int condition_dim, const int input_dim, const bool shift)
-  : _cond_to_scale_shift(condition_dim, (shift ? 2 : 1) * input_dim, /*bias=*/true)
+  : _cond_to_scale_shift(condition_dim, film_detail::checked_projection_size(input_dim, shift), /*bias=*/true)
   , _do_shift(shift)
   {
   }

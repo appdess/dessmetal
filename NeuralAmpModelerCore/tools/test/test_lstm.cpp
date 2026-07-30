@@ -4,12 +4,31 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <limits>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "NAM/lstm.h"
 
 namespace test_lstm
 {
+template <typename Function>
+void expect_lstm_failure(Function&& function, const std::string& expected_message)
+{
+  bool threw = false;
+  try
+  {
+    function();
+  }
+  catch (const std::exception& error)
+  {
+    threw = true;
+    assert(std::string(error.what()).find(expected_message) != std::string::npos);
+  }
+  assert(threw);
+}
+
 // Helper function to calculate weights needed for LSTM
 // For each LSTMCell:
 // - Weight matrix: (4 * hidden_size) x (input_size + hidden_size) in row-major order
@@ -446,6 +465,75 @@ void test_lstm_no_layers()
   {
     assert(std::isfinite(output[i]));
   }
+}
+
+void test_lstm_input_size_can_exceed_channel_count()
+{
+  const int in_channels = 1;
+  const int out_channels = 1;
+  const int num_layers = 1;
+  const int input_size = 2;
+  const int hidden_size = 2;
+  std::vector<float> weights = create_lstm_weights(num_layers, input_size, hidden_size, out_channels);
+
+  nam::lstm::LSTM lstm(in_channels, out_channels, num_layers, input_size, hidden_size, weights, 48000.0);
+  assert(lstm.NumInputChannels() == in_channels);
+
+  // Extra input features have no host channel backing them, so they must stay
+  // deterministically zero instead of exposing uninitialised Eigen storage.
+  std::vector<NAM_SAMPLE> input(4, 0.0);
+  std::vector<NAM_SAMPLE> output(4, 1.0);
+  NAM_SAMPLE* input_ptrs[] = {input.data()};
+  NAM_SAMPLE* output_ptrs[] = {output.data()};
+  lstm.process(input_ptrs, output_ptrs, static_cast<int>(input.size()));
+  for (const NAM_SAMPLE value : output)
+    assert(std::abs(value) < 1.0e-7);
+}
+
+void test_lstm_rejects_short_and_surplus_weights()
+{
+  // One 1x1 cell consumes 4 * 1 * (1 + 1) + 6 * 1 = 14 weights;
+  // its 1x1 head consumes 2 more.
+  std::vector<float> short_weights(15, 0.0f);
+  expect_lstm_failure(
+    [&]() { nam::lstm::LSTM model(1, 1, 1, 1, 1, short_weights); },
+    "LSTM weight count mismatch: expected 16, received 15");
+
+  std::vector<float> surplus_weights(17, 0.0f);
+  expect_lstm_failure(
+    [&]() { nam::lstm::LSTM model(1, 1, 1, 1, 1, surplus_weights); },
+    "LSTM weight count mismatch: expected 16, received 17");
+}
+
+void test_lstm_rejects_malformed_dimensions()
+{
+  std::vector<float> weights;
+  expect_lstm_failure(
+    [&]() { nam::lstm::LSTM model(1, 1, -1, 1, 1, weights); },
+    "num_layers must not be negative");
+  expect_lstm_failure(
+    [&]() { nam::lstm::LSTM model(2, 1, 1, 1, 1, weights); },
+    "input_size must be at least in_channels");
+  expect_lstm_failure(
+    [&]() { nam::lstm::LSTM model(1, 1, 1, 1, 0, weights); },
+    "hidden_size must be positive");
+  expect_lstm_failure(
+    [&]() {
+      nam::lstm::LSTM model(
+        1, 1, 1, 1, std::numeric_limits<int>::max() / 4 + 1, weights);
+    },
+    "dimensions exceed int range");
+  expect_lstm_failure(
+    [&]() { nam::lstm::LSTM model(1, 1, 1, std::numeric_limits<int>::max(), 1, weights); },
+    "dimensions exceed int range");
+  std::vector<float> zero_layer_weights(2, 0.0f);
+  expect_lstm_failure(
+    [&]() { nam::lstm::LSTM model(1, 1, 0, 1 << 20, 1, zero_layer_weights); },
+    "working storage exceeds the supported resource limit");
+  std::vector<float> valid_weights = create_lstm_weights(1, 1, 1, 1);
+  expect_lstm_failure(
+    [&]() { nam::lstm::LSTM model(1, 1, 1, 1, 1, valid_weights, 2.0e9); },
+    "LSTM prewarm exceeds the supported resource limit");
 }
 
 }; // namespace test_lstm

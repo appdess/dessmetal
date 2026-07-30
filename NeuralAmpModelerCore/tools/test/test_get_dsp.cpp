@@ -2,7 +2,9 @@
 #include <cassert>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -81,6 +83,365 @@ void test_null_output_level()
   std::unique_ptr<nam::DSP> dsp = get_dsp(config);
   assert(dsp->HasInputLevel());
   assert(!dsp->HasOutputLevel());
+}
+
+void test_missing_metadata_is_optional()
+{
+  nlohmann::json config = nlohmann::json::parse(basicConfigStr);
+  config.erase("metadata");
+  const std::unique_ptr<nam::DSP> dsp = nam::get_dsp(config);
+  assert(dsp != nullptr);
+  assert(!dsp->HasInputLevel());
+  assert(!dsp->HasOutputLevel());
+}
+
+void test_missing_required_top_level_field_throws()
+{
+  nlohmann::json config = nlohmann::json::parse(basicConfigStr);
+  config.erase("config");
+  bool threw = false;
+  try
+  {
+    nam::get_dsp(config);
+  }
+  catch (const std::exception&)
+  {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void test_rejects_unsafe_numeric_metadata()
+{
+  nlohmann::json config = nlohmann::json::parse(basicConfigStr);
+  config["sample_rate"] = 2.0e9;
+  bool threw = false;
+  try
+  {
+    nam::get_dsp(config);
+  }
+  catch (const std::exception&)
+  {
+    threw = true;
+  }
+  assert(threw);
+
+  config = nlohmann::json::parse(basicConfigStr);
+  config["metadata"]["input_level_dbu"] = 1.0e100;
+  threw = false;
+  try
+  {
+    nam::get_dsp(config);
+  }
+  catch (const std::exception&)
+  {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void test_null_sample_rate_is_unknown()
+{
+  nlohmann::json config = nlohmann::json::parse(basicConfigStr);
+  config["sample_rate"] = nullptr;
+  const std::unique_ptr<nam::DSP> dsp = nam::get_dsp(config);
+  assert(dsp != nullptr);
+  assert(dsp->GetExpectedSampleRate() == NAM_UNKNOWN_EXPECTED_SAMPLE_RATE);
+}
+
+void test_rejects_non_integer_architecture_dimensions()
+{
+  nlohmann::json config = nlohmann::json::parse(basicConfigStr);
+  config["config"]["num_layers"] = 1.5;
+  bool threw = false;
+  try
+  {
+    nam::get_dsp(config);
+  }
+  catch (const std::exception&)
+  {
+    threw = true;
+  }
+  assert(threw);
+
+  config = nlohmann::json::parse(basicConfigStr);
+  config["config"]["hidden_size"] = 1.0e30;
+  threw = false;
+  try
+  {
+    nam::get_dsp(config);
+  }
+  catch (const std::exception&)
+  {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void test_rejects_unsafe_linear_resources_before_allocation()
+{
+  bool threw = false;
+  try
+  {
+    const nam::Linear linear(1, 1, 1 << 20, false, std::vector<float>{0.0f}, 48000.0);
+  }
+  catch (const std::exception&)
+  {
+    threw = true;
+  }
+  assert(threw);
+
+  threw = false;
+  try
+  {
+    const nam::Linear linear(1, 4097, 1, false, std::vector<float>{0.0f}, 48000.0);
+  }
+  catch (const std::exception&)
+  {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void test_rejects_unsafe_aggregate_prewarm_buffers()
+{
+  nlohmann::json config = nlohmann::json::parse(basicConfigStr);
+  config["config"]["out_channels"] = 4096;
+  // One 3-unit LSTM layer has 66 recurrent values; its 4096x(3+1)
+  // output head has 16384 more.
+  config["weights"] = std::vector<float>(16450, 0.0f);
+  bool threw = false;
+  try
+  {
+    nam::get_dsp(config);
+  }
+  catch (const std::exception&)
+  {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void test_rejects_excessive_lstm_depth()
+{
+  nlohmann::json config = nlohmann::json::parse(basicConfigStr);
+  config["config"]["num_layers"] = 17;
+  bool threw = false;
+  try
+  {
+    nam::get_dsp(config);
+  }
+  catch (const std::exception&)
+  {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void test_rejects_excessive_convolution_prewarm_work()
+{
+  nlohmann::json config = {
+    {"version", "0.5.4"},
+    {"metadata", nullptr},
+    {"architecture", "ConvNet"},
+    {"config",
+     {{"channels", 1},
+      {"dilations", std::vector<int>(3900, 256)},
+      {"batchnorm", false},
+      {"activation", "Tanh"}}},
+    {"weights", nlohmann::json::array()},
+    {"sample_rate", 48000}};
+  bool threw = false;
+  try
+  {
+    nam::get_dsp(config);
+  }
+  catch (const std::exception&)
+  {
+    threw = true;
+  }
+  assert(threw);
+
+  config = {{"version", "0.5.4"},
+            {"metadata", nullptr},
+            {"architecture", "WaveNet"},
+            {"config",
+             {{"layers",
+               {{{"input_size", 1},
+                 {"condition_size", 1},
+                 {"head_size", 1},
+                 {"channels", 1},
+                 {"kernel_size", 2},
+                 {"dilations", std::vector<int>(1500, 250)},
+                 {"activation", "Tanh"},
+                 {"gated", false},
+                 {"head_bias", false}}}},
+              {"head", nullptr},
+              {"head_scale", 0.02f}}},
+            {"weights", nlohmann::json::array()},
+            {"sample_rate", 48000}};
+  threw = false;
+  try
+  {
+    nam::get_dsp(config);
+  }
+  catch (const std::exception&)
+  {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void test_rejects_width_amplified_prewarm_compute()
+{
+  nlohmann::json config = {
+    {"version", "0.5.4"},
+    {"metadata", nullptr},
+    {"architecture", "ConvNet"},
+    {"config",
+     {{"in_channels", 1},
+      {"out_channels", 4095},
+      {"channels", 30},
+      {"dilations", {500000}},
+      {"batchnorm", false},
+      {"activation", "Tanh"}}},
+    {"weights", nlohmann::json::array()},
+    {"sample_rate", 48000}};
+  bool threw = false;
+  try
+  {
+    nam::get_dsp(config);
+  }
+  catch (const std::exception&)
+  {
+    threw = true;
+  }
+  assert(threw);
+
+  config = nlohmann::json::parse(basicConfigStr);
+  config["config"] = {
+    {"in_channels", 1}, {"out_channels", 4095}, {"input_size", 1}, {"hidden_size", 30}, {"num_layers", 1}};
+  config["weights"] = std::vector<float>(130845, 0.0f);
+  config["sample_rate"] = 768000;
+  threw = false;
+  try
+  {
+    nam::get_dsp(config);
+  }
+  catch (const std::exception&)
+  {
+    threw = true;
+  }
+  assert(threw);
+
+  config = {{"version", "0.5.4"},
+            {"metadata", nullptr},
+            {"architecture", "WaveNet"},
+            {"config",
+             {{"layers",
+               {{{"input_size", 1},
+                 {"condition_size", 1},
+                 {"head_size", 4095},
+                 {"channels", 1},
+                 {"bottleneck", 30},
+                 {"kernel_size", 2},
+                 {"dilations", {500000}},
+                 {"activation", "Tanh"},
+                 {"gated", false},
+                 {"head_bias", false}}}},
+              {"head", nullptr},
+              {"head_scale", 0.02f}}},
+            {"weights", nlohmann::json::array()},
+            {"sample_rate", 48000}};
+  threw = false;
+  try
+  {
+    nam::get_dsp(config);
+  }
+  catch (const std::exception&)
+  {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void test_rejects_nonfinite_weights_and_invalid_metadata_shape()
+{
+  nlohmann::json config = nlohmann::json::parse(basicConfigStr);
+  config["weights"][0] = std::numeric_limits<double>::infinity();
+  bool threw = false;
+  try
+  {
+    nam::get_dsp(config);
+  }
+  catch (const std::exception&)
+  {
+    threw = true;
+  }
+  assert(threw);
+
+  config = nlohmann::json::parse(basicConfigStr);
+  config["metadata"] = nlohmann::json::array();
+  threw = false;
+  try
+  {
+    nam::get_dsp(config);
+  }
+  catch (const std::exception&)
+  {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void test_rejects_excessive_nested_condition_models()
+{
+  nlohmann::json nested = nlohmann::json::parse(basicConfigStr);
+  for (int depth = 0; depth < 5; ++depth)
+  {
+    nested = {{"version", "0.5.4"},
+              {"metadata", nullptr},
+              {"architecture", "WaveNet"},
+              {"config", {{"global_condition_size", 0}, {"condition_dsp", nested}}},
+              {"weights", nlohmann::json::array()},
+              {"sample_rate", 48000}};
+  }
+
+  bool threw = false;
+  try
+  {
+    nam::get_dsp(nested);
+  }
+  catch (const std::exception&)
+  {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void test_rejects_mismatched_prelu_channels()
+{
+  const nlohmann::json config = {
+    {"version", "0.5.4"},
+    {"metadata", nullptr},
+    {"architecture", "ConvNet"},
+    {"config",
+     {{"channels", 1},
+      {"dilations", {1}},
+      {"batchnorm", false},
+      {"activation", {{"type", "PReLU"}, {"negative_slopes", {0.1f, 0.2f}}}}}},
+    {"weights", {0.0f, 0.0f, 0.0f, 0.0f, 0.0f}},
+    {"sample_rate", 48000.0}};
+  bool threw = false;
+  try
+  {
+    nam::get_dsp(config);
+  }
+  catch (const std::runtime_error&)
+  {
+    threw = true;
+  }
+  assert(threw);
 }
 
 // Helper function to process buffers through a DSP model
