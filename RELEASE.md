@@ -184,7 +184,15 @@ as data, executes no repository-owned script, rejects fork heads, and dispatches
 the existing WIF mapping's exact `refs/heads/main`, workflow path, `workflow_dispatch`, and protected-environment
 claims. The scanner uploads SARIF against the exact generated PR merge commit at `refs/pull/<number>/merge`. The
 protected `main` ruleset requires a result from the `Codex Security` code-scanning tool and is configured to block
-every finding, including notes. Missing or invalid results also leave the merge blocked.
+every in-diff finding, including notes. GitHub merge protection does not block a PR on unrelated baseline lines, so
+the release deep scan remains the whole-tree gate. Missing or invalid results also leave the merge blocked.
+
+GitHub's native code-scanning rule binds the declared SARIF tool name, not the producing workflow path or analysis
+category. The dispatcher rejects fork heads, fork workflow tokens are read-only, and `appdess` was the only direct
+collaborator when this gate was enabled on 2026-07-29. Consequently the current single-owner setup is protected from
+fork spoofing, but every future same-repository writer must be treated as part of the CI trust boundary. Before
+granting another account write access, move the final merge signal to a dedicated GitHub App or equivalent external
+producer whose identity cannot be minted by pull-request-owned Actions.
 
 The scan exchanges GitHub's signed job identity for a short-lived OpenAI token, verifies the expected OIDC claims,
 and gives each token only to Codex's guarded provider-auth process. The scanner's mandatory API-key login bootstrap

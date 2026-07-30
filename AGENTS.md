@@ -71,7 +71,11 @@ public release.
 - [`.github/workflows/codex-security-pr.yml`](.github/workflows/codex-security-pr.yml) is the trusted PR dispatcher.
   It runs from protected `main`, executes no PR-owned code, rejects fork heads, binds the GitHub merge commit and
   source-archive hash, and dispatches the protected scanner. Findings are uploaded as SARIF against the PR merge ref;
-  the repository's native code-scanning rule requires the `Codex Security` tool result and blocks every finding.
+  the repository's native code-scanning rule requires the `Codex Security` tool result and blocks every in-diff
+  finding at the configured thresholds. The separate release deep scan covers the whole source tree.
+  GitHub authenticates that rule by SARIF tool name, not workflow path, so same-repository writers are part of the CI
+  trust boundary. The dispatcher rejects forks; establish a dedicated GitHub App or equivalent trusted producer
+  before granting another account direct write access.
 - [`.github/workflows/codex-security.yml`](.github/workflows/codex-security.yml) is the protected source-scan gate.
   It uses GitHub OIDC and OpenAI workload identity federation; do not add a reusable OpenAI API key or expose its
   short-lived token outside the scanner step. PR scans must enter through the trusted dispatcher and retain the

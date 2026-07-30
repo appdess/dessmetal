@@ -1,10 +1,11 @@
 #pragma once
 
-#include <cassert>
+#include <cstddef>
 #include <cmath> // expf
 #include <functional>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -270,29 +271,36 @@ public:
   }
   ActivationPReLU(std::vector<float> ns) { negative_slopes = ns; }
 
-  void apply(Eigen::MatrixXf& matrix) override
+  void apply(Eigen::MatrixXf& matrix) override { apply_channelwise_(matrix); }
+  void apply(Eigen::Block<Eigen::MatrixXf> block) override { apply_channelwise_(block); }
+  void apply(Eigen::Block<Eigen::MatrixXf, -1, -1, true> block) override { apply_channelwise_(block); }
+  void apply(float*, long) override
   {
-    // Matrix is organized as (channels, time_steps)
-    unsigned long actual_channels = static_cast<unsigned long>(matrix.rows());
-
-    // Prepare the slopes for the current matrix size
-    std::vector<float> slopes_for_channels = negative_slopes;
-
-    // Fail loudly if input has more channels than activation
-    assert(actual_channels == negative_slopes.size());
-
-    // Apply each negative slope to its corresponding channel
-    for (unsigned long channel = 0; channel < actual_channels; channel++)
-    {
-      // Apply the negative slope to all time steps in this channel
-      for (int time_step = 0; time_step < matrix.cols(); time_step++)
-      {
-        matrix(channel, time_step) = leaky_relu(matrix(channel, time_step), slopes_for_channels[channel]);
-      }
-    }
+    throw std::runtime_error("PReLU requires channel-shaped matrix input");
   }
 
 private:
+  template <typename MatrixLike> void apply_channelwise_(MatrixLike& matrix)
+  {
+    // Matrix is organized as (channels, time_steps)
+    const auto actual_channels = static_cast<std::size_t>(matrix.rows());
+    if (negative_slopes.empty())
+      throw std::runtime_error("PReLU requires at least one negative slope");
+    const bool broadcast_single_slope = negative_slopes.size() == 1U;
+    if (!broadcast_single_slope && actual_channels != negative_slopes.size())
+      throw std::runtime_error("PReLU slope count must be one or match the channel count");
+
+    // Apply each negative slope to its corresponding channel
+    for (std::size_t channel = 0; channel < actual_channels; channel++)
+    {
+      const float slope = negative_slopes[broadcast_single_slope ? 0U : channel];
+      // Apply the negative slope to all time steps in this channel
+      for (int time_step = 0; time_step < matrix.cols(); time_step++)
+      {
+        matrix(channel, time_step) = leaky_relu(matrix(channel, time_step), slope);
+      }
+    }
+  }
   std::vector<float> negative_slopes;
 };
 

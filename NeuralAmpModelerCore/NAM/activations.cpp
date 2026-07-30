@@ -1,4 +1,5 @@
 #include "activations.h"
+#include "model_validation.h"
 
 // Global singleton instances (statically allocated, never deleted)
 static nam::activations::ActivationTanh _TANH;
@@ -87,7 +88,7 @@ nam::activations::ActivationConfig nam::activations::ActivationConfig::from_json
   // If it's an object, parse type and parameters
   if (j.is_object())
   {
-    std::string type_str = j["type"].get<std::string>();
+    std::string type_str = j.at("type").get<std::string>();
     auto it = type_map.find(type_str);
     if (it == type_map.end())
     {
@@ -100,23 +101,35 @@ nam::activations::ActivationConfig nam::activations::ActivationConfig::from_json
     {
       if (j.find("negative_slope") != j.end())
       {
-        config.negative_slope = j["negative_slope"].get<float>();
+        config.negative_slope = model_validation::json_float_at(j, "negative_slope");
       }
       else if (j.find("negative_slopes") != j.end())
       {
-        config.negative_slopes = j["negative_slopes"].get<std::vector<float>>();
+        const auto& values = j.at("negative_slopes");
+        if (!values.is_array())
+          throw std::invalid_argument("negative_slopes must be an array");
+        if (values.size() > model_validation::kMaxActivationChannelValues)
+          throw std::invalid_argument("negative_slopes exceeds the supported element count");
+        std::vector<float> slopes;
+        slopes.reserve(values.size());
+        for (std::size_t index = 0; index < values.size(); ++index)
+        {
+          slopes.push_back(
+            model_validation::json_float(values.at(index), "negative_slopes[" + std::to_string(index) + "]"));
+        }
+        config.negative_slopes = std::move(slopes);
       }
     }
     else if (config.type == ActivationType::LeakyReLU)
     {
-      config.negative_slope = j.value("negative_slope", 0.01f);
+      config.negative_slope = model_validation::json_float_value(j, "negative_slope", 0.01f);
     }
     else if (config.type == ActivationType::LeakyHardtanh)
     {
-      config.min_val = j.value("min_val", -1.0f);
-      config.max_val = j.value("max_val", 1.0f);
-      config.min_slope = j.value("min_slope", 0.01f);
-      config.max_slope = j.value("max_slope", 0.01f);
+      config.min_val = model_validation::json_float_value(j, "min_val", -1.0f);
+      config.max_val = model_validation::json_float_value(j, "max_val", 1.0f);
+      config.min_slope = model_validation::json_float_value(j, "min_slope", 0.01f);
+      config.max_slope = model_validation::json_float_value(j, "max_slope", 0.01f);
     }
 
     return config;

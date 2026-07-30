@@ -4,12 +4,31 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <limits>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "NAM/convnet.h"
 
 namespace test_convnet
 {
+template <typename Function>
+void expect_convnet_failure(Function&& function, const std::string& expected_message)
+{
+  bool threw = false;
+  try
+  {
+    function();
+  }
+  catch (const std::exception& error)
+  {
+    threw = true;
+    assert(std::string(error.what()).find(expected_message) != std::string::npos);
+  }
+  assert(threw);
+}
+
 // Test basic ConvNet construction and processing
 void test_convnet_basic()
 {
@@ -308,5 +327,67 @@ void test_convnet_multiple_calls()
       assert(std::isfinite(output[j]));
     }
   }
+}
+
+void test_convnet_grouped_weight_count()
+{
+  const auto activation = nam::activations::ActivationConfig::simple(nam::activations::ActivationType::ReLU);
+  // Conv: 2 * 2 * (2 / 2) = 4; bias = 2; head = 1 * (2 + 1) = 3.
+  std::vector<float> weights(9, 0.0f);
+  nam::convnet::ConvNet convnet(2, 1, 2, {1}, false, activation, weights, 48000.0, 2);
+  assert(convnet.NumInputChannels() == 2);
+  assert(convnet.NumOutputChannels() == 1);
+}
+
+void test_convnet_rejects_short_and_surplus_weights()
+{
+  const auto activation = nam::activations::ActivationConfig::simple(nam::activations::ActivationType::ReLU);
+  // Conv: 2 weights + 1 bias; head: 1 weight + 1 bias.
+  std::vector<float> short_weights(4, 0.0f);
+  expect_convnet_failure(
+    [&]() { nam::convnet::ConvNet model(1, 1, 1, {1}, false, activation, short_weights); },
+    "ConvNet weight count mismatch: expected 5, received 4");
+
+  std::vector<float> surplus_weights(6, 0.0f);
+  expect_convnet_failure(
+    [&]() { nam::convnet::ConvNet model(1, 1, 1, {1}, false, activation, surplus_weights); },
+    "ConvNet weight count mismatch: expected 5, received 6");
+}
+
+void test_convnet_rejects_malformed_dimensions()
+{
+  const auto activation = nam::activations::ActivationConfig::simple(nam::activations::ActivationType::ReLU);
+  std::vector<float> weights(5, 0.0f);
+
+  expect_convnet_failure(
+    [&]() { nam::convnet::ConvNet model(1, 1, 1, {}, false, activation, weights); },
+    "dilations must not be empty");
+  expect_convnet_failure(
+    [&]() { nam::convnet::ConvNet model(1, 1, 1, {0}, false, activation, weights); },
+    "dilation must be positive");
+  expect_convnet_failure(
+    [&]() { nam::convnet::ConvNet model(1, 1, 1, {-1}, false, activation, weights); },
+    "dilation must be positive");
+  expect_convnet_failure(
+    [&]() { nam::convnet::ConvNet model(1, 1, 0, {1}, false, activation, weights); },
+    "channels must be positive");
+  expect_convnet_failure(
+    [&]() { nam::convnet::ConvNet model(1, 1, 1, {1}, false, activation, weights, 48000.0, 0); },
+    "groups must be positive");
+  expect_convnet_failure(
+    [&]() { nam::convnet::ConvNet model(3, 1, 4, {1}, false, activation, weights, 48000.0, 2); },
+    "channels must be divisible by groups");
+  expect_convnet_failure(
+    [&]() {
+      nam::convnet::ConvNet model(
+        1, 1, 1, {std::numeric_limits<int>::max()}, false, activation, weights);
+    },
+    "dilation is too large");
+  expect_convnet_failure(
+    [&]() { nam::convnet::ConvNet model(1, 1, 1, {1 << 20}, false, activation, weights); },
+    "buffer exceeds the supported resource limit");
+  expect_convnet_failure(
+    [&]() { nam::convnet::ConvNet model(5000, 1, 5000, {1}, false, activation, weights, 48000.0, 5000); },
+    "dense storage exceeds the supported resource limit");
 }
 }; // namespace test_convnet

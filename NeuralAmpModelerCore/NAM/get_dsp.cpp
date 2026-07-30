@@ -8,12 +8,33 @@
 #include "registry.h"
 #include "json.hpp"
 #include "lstm.h"
+#include "model_validation.h"
 #include "convnet.h"
 #include "wavenet.h"
 #include "get_dsp.h"
 
 namespace nam
 {
+namespace
+{
+constexpr int kMaxNestedModelDepth = 4;
+thread_local int gNestedModelDepth = 0;
+
+class ModelDepthGuard
+{
+public:
+  ModelDepthGuard()
+  {
+    if (gNestedModelDepth >= kMaxNestedModelDepth)
+      throw std::invalid_argument("Nested condition DSP depth exceeds the supported limit");
+    ++gNestedModelDepth;
+  }
+
+  ~ModelDepthGuard() { --gNestedModelDepth; }
+};
+
+} // namespace
+
 struct Version
 {
   int major;
@@ -72,12 +93,16 @@ void verify_config_version(const std::string versionStr)
 std::vector<float> GetWeights(nlohmann::json const& j)
 {
   auto it = j.find("weights");
-  if (it != j.end())
-  {
-    return *it;
-  }
-  else
+  if (it == j.end())
     throw std::runtime_error("Corrupted model file is missing weights.");
+  if (!it->is_array())
+    throw std::invalid_argument("Model weights must be an array");
+
+  std::vector<float> weights;
+  weights.reserve(it->size());
+  for (const auto& weight : *it)
+    weights.push_back(model_validation::json_float(weight, "Model weight"));
+  return weights;
 }
 
 std::unique_ptr<DSP> get_dsp(const std::filesystem::path config_filename)
@@ -112,17 +137,21 @@ std::unique_ptr<DSP> get_dsp(const std::filesystem::path config_filename, dspDat
 
 std::unique_ptr<DSP> get_dsp(const nlohmann::json& config, dspData& returnedConfig)
 {
-  verify_config_version(config["version"].get<std::string>());
+  const std::string version = config.at("version").get<std::string>();
+  const std::string architecture = config.at("architecture").get<std::string>();
+  nlohmann::json config_json = config.at("config");
+  verify_config_version(version);
 
-  auto architecture = config["architecture"];
-  nlohmann::json config_json = config["config"];
   std::vector<float> weights = GetWeights(config);
 
   // Assign values to returnedConfig
-  returnedConfig.version = config["version"].get<std::string>();
-  returnedConfig.architecture = config["architecture"].get<std::string>();
+  returnedConfig.version = version;
+  returnedConfig.architecture = architecture;
   returnedConfig.config = config_json;
-  returnedConfig.metadata = config["metadata"];
+  const auto metadata = config.find("metadata");
+  returnedConfig.metadata = metadata == config.end() ? nlohmann::json(nullptr) : *metadata;
+  if (!returnedConfig.metadata.is_null() && !returnedConfig.metadata.is_object())
+    throw std::invalid_argument("Model metadata must be an object or null");
   returnedConfig.weights = weights;
   returnedConfig.expected_sample_rate = nam::get_sample_rate_from_nam_file(config);
 
@@ -143,6 +172,7 @@ struct OptionalValue
 
 std::unique_ptr<DSP> get_dsp(dspData& conf)
 {
+  ModelDepthGuard model_depth_guard;
   verify_config_version(conf.version);
 
   auto& architecture = conf.architecture;
@@ -195,10 +225,12 @@ std::unique_ptr<DSP> get_dsp(dspData& conf)
 
 double get_sample_rate_from_nam_file(const nlohmann::json& j)
 {
-  if (j.find("sample_rate") != j.end())
-    return j["sample_rate"];
-  else
-    return -1.0;
+  const auto sample_rate = j.find("sample_rate");
+  if (sample_rate == j.end() || sample_rate->is_null())
+    return NAM_UNKNOWN_EXPECTED_SAMPLE_RATE;
+  if (!sample_rate->is_number())
+    throw std::invalid_argument("Model sample_rate must be numeric or null");
+  return sample_rate->get<double>();
 }
 
 }; // namespace nam

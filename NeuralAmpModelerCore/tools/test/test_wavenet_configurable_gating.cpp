@@ -270,8 +270,10 @@ public:
 
     // Set some weights to make the layers produce different outputs
     std::vector<float> weights;
-    // Add weights for conv layer (simplified - just enough to make it non-zero)
-    const int conv_weights = channels * 2 * bottleneck * kernelSize; // 2*bottleneck for gated
+    // Add weights and bias for the input convolution. Gating doubles the
+    // bottleneck-sized output, and Conv1D serializes one bias per output.
+    const int convolution_outputs = 2 * bottleneck;
+    const int conv_weights = channels * convolution_outputs * kernelSize + convolution_outputs;
     for (int i = 0; i < conv_weights; i++)
     {
       weights.push_back(0.1f * i);
@@ -282,8 +284,8 @@ public:
     {
       weights.push_back(0.05f * i);
     }
-    // Add weights for 1x1 conv
-    const int conv1x1_weights = bottleneck * channels;
+    // Add weights and bias for the residual 1x1 convolution.
+    const int conv1x1_weights = bottleneck * channels + channels;
     for (int i = 0; i < conv1x1_weights; i++)
     {
       weights.push_back(0.02f * i);

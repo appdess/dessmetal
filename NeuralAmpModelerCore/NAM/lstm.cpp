@@ -1,10 +1,111 @@
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <string>
 #include <vector>
 #include <memory>
 
+#include "model_validation.h"
 #include "registry.h"
 #include "lstm.h"
+
+namespace
+{
+constexpr std::size_t kMaxLSTMWorkingValues = 1U << 20;
+constexpr std::size_t kMaxLSTMPrewarmSamples = 1U << 20;
+constexpr std::size_t kMaxLSTMLayers = 16U;
+
+int validate_lstm_model(const int in_channels, const int out_channels, const int num_layers, const int input_size,
+                        const int hidden_size, const std::size_t actual_weights, const double expected_sample_rate)
+{
+  using nam::model_validation::checked_add;
+  using nam::model_validation::checked_multiply;
+  using nam::model_validation::nonnegative_dimension;
+  using nam::model_validation::positive_dimension;
+
+  const std::size_t input_channels = positive_dimension(in_channels, "LSTM in_channels");
+  const std::size_t output_channels = positive_dimension(out_channels, "LSTM out_channels");
+  const std::size_t layer_count = nonnegative_dimension(num_layers, "LSTM num_layers");
+  const std::size_t cell_input_size = positive_dimension(input_size, "LSTM input_size");
+  const std::size_t cell_hidden_size = positive_dimension(hidden_size, "LSTM hidden_size");
+
+  if (layer_count > kMaxLSTMLayers)
+    throw std::invalid_argument("LSTM num_layers exceeds the supported architecture limit");
+
+  if (cell_input_size < input_channels)
+    throw std::invalid_argument("LSTM input_size must be at least in_channels");
+
+  // LSTMCell passes these expressions to Eigen as int dimensions. Check them
+  // explicitly so malformed metadata cannot overflow before allocation.
+  const std::size_t four_hidden = checked_multiply(4U, cell_hidden_size, "LSTM gate rows");
+  const std::size_t input_and_hidden = checked_add(cell_input_size, cell_hidden_size, "LSTM cell columns");
+  if (four_hidden > static_cast<std::size_t>(std::numeric_limits<int>::max())
+      || input_and_hidden > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+  {
+    throw std::invalid_argument("LSTM dimensions exceed int range");
+  }
+
+  std::size_t working_values = checked_add(cell_input_size, output_channels, "LSTM working storage");
+  if (layer_count > 0U)
+  {
+    working_values = checked_add(
+      working_values,
+      checked_add(cell_input_size, checked_multiply(10U, cell_hidden_size, "LSTM working storage"),
+                  "LSTM working storage"),
+      "LSTM working storage");
+    if (layer_count > 1U)
+    {
+      working_values = checked_add(
+        working_values,
+        checked_multiply(
+          layer_count - 1U, checked_multiply(11U, cell_hidden_size, "LSTM working storage"),
+          "LSTM working storage"),
+        "LSTM working storage");
+    }
+  }
+  if (working_values > kMaxLSTMWorkingValues)
+    throw std::invalid_argument("LSTM working storage exceeds the supported resource limit");
+
+  const std::size_t state_weights = checked_multiply(6U, cell_hidden_size, "LSTM cell state");
+  const std::size_t first_cell_weights = checked_add(
+    checked_multiply(four_hidden, input_and_hidden, "LSTM first cell"), state_weights, "LSTM first cell");
+  const std::size_t later_cell_weights = checked_add(
+    checked_multiply(8U, checked_multiply(cell_hidden_size, cell_hidden_size, "LSTM hidden cell"),
+                     "LSTM hidden cell"),
+    state_weights, "LSTM hidden cell");
+
+  std::size_t expected_weights = checked_multiply(
+    output_channels, checked_add(cell_hidden_size, 1U, "LSTM head"), "LSTM head");
+  if (layer_count > 0U)
+  {
+    expected_weights = checked_add(expected_weights, first_cell_weights, "LSTM model");
+    if (layer_count > 1U)
+    {
+      expected_weights = checked_add(
+        expected_weights, checked_multiply(layer_count - 1U, later_cell_weights, "LSTM hidden layers"),
+        "LSTM model");
+    }
+  }
+
+  nam::model_validation::require_exact_weight_count("LSTM", expected_weights, actual_weights);
+  std::size_t prewarm_samples = 1U;
+  if (expected_sample_rate != NAM_UNKNOWN_EXPECTED_SAMPLE_RATE)
+  {
+    const double requested_samples = 0.5 * expected_sample_rate;
+    if (!std::isfinite(requested_samples) || requested_samples <= 0.0
+        || requested_samples > static_cast<double>(kMaxLSTMPrewarmSamples))
+    {
+      throw std::invalid_argument("LSTM prewarm exceeds the supported resource limit");
+    }
+    prewarm_samples = static_cast<std::size_t>(requested_samples);
+  }
+  const std::size_t prewarm_compute =
+    checked_multiply(expected_weights, prewarm_samples, "LSTM prewarm compute");
+  if (prewarm_compute > nam::model_validation::kMaxPrewarmComputeOperations)
+    throw std::invalid_argument("LSTM prewarm compute exceeds the supported resource limit");
+  return in_channels;
+}
+} // namespace
 
 nam::lstm::LSTMCell::LSTMCell(const int input_size, const int hidden_size, std::vector<float>::iterator& weights)
 {
@@ -67,10 +168,14 @@ void nam::lstm::LSTMCell::process_(const Eigen::VectorXf& x)
 
 nam::lstm::LSTM::LSTM(const int in_channels, const int out_channels, const int num_layers, const int input_size,
                       const int hidden_size, std::vector<float>& weights, const double expected_sample_rate)
-: DSP(in_channels, out_channels, expected_sample_rate)
+: DSP(validate_lstm_model(
+        in_channels, out_channels, num_layers, input_size, hidden_size, weights.size(), expected_sample_rate),
+      out_channels, expected_sample_rate)
 {
+  this->mEstimatedOperationsPerSample = weights.size();
   // Allocate input and output vectors
   this->_input.resize(input_size);
+  this->_input.setZero();
   this->_output.resize(out_channels);
 
   std::vector<float>::iterator it = weights.begin();
@@ -95,7 +200,8 @@ nam::lstm::LSTM::LSTM(const int in_channels, const int out_channels, const int n
     this->_head_bias(out_ch) = *(it++);
   }
 
-  assert(it == weights.end());
+  if (it != weights.end())
+    throw std::runtime_error("LSTM internal weight-count validation failed");
 }
 
 void nam::lstm::LSTM::process(NAM_SAMPLE** input, NAM_SAMPLE** output, const int num_frames)
@@ -124,10 +230,17 @@ void nam::lstm::LSTM::process(NAM_SAMPLE** input, NAM_SAMPLE** output, const int
 
 int nam::lstm::LSTM::PrewarmSamples()
 {
-  int result = (int)(0.5 * mExpectedSampleRate);
   // If the expected sample rate wasn't provided, it'll be -1.
   // Make sure something still happens.
-  return result <= 0 ? 1 : result;
+  if (mExpectedSampleRate <= 0.0)
+    return 1;
+  const double requested_samples = 0.5 * mExpectedSampleRate;
+  if (!std::isfinite(requested_samples)
+      || requested_samples > static_cast<double>(kMaxLSTMPrewarmSamples))
+  {
+    throw std::invalid_argument("LSTM prewarm exceeds the supported resource limit");
+  }
+  return static_cast<int>(requested_samples);
 }
 
 void nam::lstm::LSTM::_process_sample()
@@ -167,12 +280,12 @@ void nam::lstm::LSTM::_process_sample()
 std::unique_ptr<nam::DSP> nam::lstm::Factory(const nlohmann::json& config, std::vector<float>& weights,
                                              const double expectedSampleRate)
 {
-  const int num_layers = config["num_layers"];
-  const int input_size = config["input_size"];
-  const int hidden_size = config["hidden_size"];
+  const int num_layers = model_validation::json_integer_at(config, "num_layers");
+  const int input_size = model_validation::json_integer_at(config, "input_size");
+  const int hidden_size = model_validation::json_integer_at(config, "hidden_size");
   // Default to 1 channel in/out for backward compatibility
-  const int in_channels = config.value("in_channels", 1);
-  const int out_channels = config.value("out_channels", 1);
+  const int in_channels = model_validation::json_integer_value(config, "in_channels", 1);
+  const int out_channels = model_validation::json_integer_value(config, "out_channels", 1);
   return std::make_unique<nam::lstm::LSTM>(
     in_channels, out_channels, num_layers, input_size, hidden_size, weights, expectedSampleRate);
 }

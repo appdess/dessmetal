@@ -564,6 +564,8 @@ public:
   /// rief Set the conditioning vector used by prewarm() and legacy hosts.
   void SetDefaultParams(const double* params, const int num_params) override;
 
+  std::size_t EstimatedOperationsPerSample() const override { return mEstimatedOperationsPerSample; }
+
   /// \brief Set model weights from a vector
   /// \param weights Vector containing all model weights
   void set_weights_(std::vector<float>& weights);
@@ -618,6 +620,7 @@ private:
   std::vector<double> _default_global_condition;
 
   int mPrewarmSamples = 0; // Pre-compute during initialization
+  std::size_t mEstimatedOperationsPerSample = 1U;
   int PrewarmSamples() override { return mPrewarmSamples; };
 };
 

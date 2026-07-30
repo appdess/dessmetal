@@ -24,6 +24,16 @@ a formal penetration test.
   and order remain unchanged.
 - WaveNet bounds global conditioning to 64 values, checks condition-DSP dimension addition for overflow, validates
   combined condition sizes, and rejects wrong-size or non-finite conditioning vectors.
+- ConvNet, LSTM, and WaveNet now validate model-controlled dimensions, convolution groups, architecture chains, and
+  exact checked flattened-weight counts before Eigen allocation or any weight iterator is consumed. Short, surplus,
+  empty, zero-group, overflow-sized, and cross-layer-incompatible fixtures fail with exceptions instead of reading
+  beyond the serialized vector; valid bundled and grouped configurations retain their existing weight order.
+- Required NAM JSON fields use checked access and range-checked integer/finite-float conversion. Omitted optional
+  metadata and sample rate remain compatible, nested condition models are depth-bounded, and the `loadmodel` utility
+  reports model exceptions as a normal failure. Dense/runtime storage, channel grids, PReLU vectors, receptive
+  fields, prewarm duration, and estimated prewarm compute have checked aggregate limits, including nested condition
+  DSP cost. Legacy metadata-free examples load, while malformed schema, weight-count, allocation-amplification, and
+  prewarm-amplification fixtures reject cleanly under ASan/UBSan.
 - Amp/boost/IR selection no longer loads from `OnParamChange`. Requests carry selection, generation, and prepared
   audio-configuration metadata and are coalesced for a serialized service path. Producers publish only complete
   prepared objects through atomic pointers; real-time `ProcessBlock` only adopts matching objects at a block
@@ -59,7 +69,10 @@ a formal penetration test.
   The real installed-AU migration harness passes the original 14-value 0.1.0, later 20-value 0.1.0, and current
   20-value 0.1.1 cases.
 - NeuralAmpModelerCore tests pass, including all four bundled parametric amp models, all four fixed drive models,
-  Gain response, combined condition-DSP/global conditioning, invalid dimensions, and non-finite defaults.
+  Gain response, combined condition-DSP/global conditioning, invalid dimensions, non-finite defaults, and malformed
+  ConvNet/LSTM/WaveNet dimension, exact-weight-count, nested-depth, resource, and prewarm-compute regressions. All 16
+  tracked NAM files load under both the normal and sanitizer builds. The complete Core suite also passes under
+  AddressSanitizer and UndefinedBehaviorSanitizer with Apple Command Line Tools clang 21.
 - The hardened WAV regression corpus passes under AddressSanitizer and UndefinedBehaviorSanitizer with Apple Command
   Line Tools clang 21, plus libc++ debug bounds hardening. The Xcode toolchain's separate pre-`main()` sanitizer
   hang also reproduces in a hello-world program and is not attributed to DessMetal.
@@ -97,9 +110,9 @@ a formal penetration test.
 
 - Automated execution cannot judge tone, feel, aliasing, cabinet realism, or noise. A controlled listening test
   remains required.
-- The current product loads only its fixed bundled NAM allowlist. Arbitrary custom-NAM import must not be restored
-  until JSON bytes/depth/dimensions, convolution groups, and expected weight counts are bounded and malformed model
-  inputs are fuzzed.
+- The current product loads only its fixed bundled NAM allowlist. Architecture dimensions, convolution groups, and
+  expected ConvNet/LSTM/WaveNet weight counts now fail closed, but arbitrary custom-NAM import must not be restored
+  until a JSON byte limit and a maintained malformed-model fuzz corpus are also in place.
 - GitHub Actions run `30451268583` passed arm64 and x86_64 for fix-introducing commit `a075999`; final run
   `30454055926` passed both architectures for tagged release commit `a3d57e6`. The release body identifies that run,
   final artifact hashes, and Apple submission `f65db216-98ac-433c-b389-5a42edb033d5`.

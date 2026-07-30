@@ -4,6 +4,8 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <limits>
+#include <stdexcept>
 #include <vector>
 
 #include "NAM/wavenet.h"
@@ -31,6 +33,42 @@ static nam::wavenet::LayerArrayParams make_layer_array_params(
     input_size, condition_size, head_size, channels, bottleneck, kernel_size, std::move(dilations), activation_config,
     gating_mode, head_bias, groups_input, groups_input_mixin, groups_1x1, head1x1_params, secondary_activation_config,
     film_params, film_params, film_params, film_params, film_params, film_params, film_params, film_params);
+}
+
+template <typename Callable> static void expect_model_rejected(Callable&& callable)
+{
+  bool threw = false;
+  try
+  {
+    callable();
+  }
+  catch (const std::exception&)
+  {
+    threw = true;
+  }
+  assert(threw);
+}
+
+static void construct_wavenet(const int in_channels,
+                              const std::vector<nam::wavenet::LayerArrayParams>& layer_array_params,
+                              std::vector<float> weights, const int global_condition_size = 0)
+{
+  std::unique_ptr<nam::DSP> condition_dsp = nullptr;
+  nam::wavenet::WaveNet model(
+    in_channels, layer_array_params, 1.0f, false, std::move(weights), std::move(condition_dsp), 48000.0,
+    global_condition_size);
+}
+
+static nam::wavenet::LayerArrayParams make_simple_validation_params(
+  const int input_size = 1, const int condition_size = 1, const int head_size = 1, const int channels = 1,
+  const int bottleneck = 1, std::vector<int>&& dilations = std::vector<int>{1}, const int groups_input = 1,
+  const nam::wavenet::GatingMode gating_mode = nam::wavenet::GatingMode::NONE, const int kernel_size = 1)
+{
+  return make_layer_array_params(
+    input_size, condition_size, head_size, channels, bottleneck, kernel_size, std::move(dilations),
+    nam::activations::ActivationConfig::simple(nam::activations::ActivationType::ReLU), gating_mode, false,
+    groups_input, 1, 1, nam::wavenet::Head1x1Params(false, channels, 1),
+    nam::activations::ActivationConfig{});
 }
 // Test full WaveNet model
 void test_wavenet_model()
@@ -337,6 +375,140 @@ void test_wavenet_prewarm()
   {
     assert(std::isfinite(output[i]));
   }
+}
+
+void test_wavenet_exact_weight_count_includes_all_films()
+{
+  const auto activation = nam::activations::ActivationConfig::simple(nam::activations::ActivationType::Tanh);
+  const auto secondary_activation =
+    nam::activations::ActivationConfig::simple(nam::activations::ActivationType::Sigmoid);
+  const nam::wavenet::_FiLMParams shift_film(true, true);
+  const nam::wavenet::_FiLMParams scale_film(true, false);
+  std::vector<nam::wavenet::LayerArrayParams> params;
+  params.emplace_back(
+    2, 2, 3, 4, 2, 3, std::vector<int>{1, 2}, activation, nam::wavenet::GatingMode::GATED, true,
+    2, 2, 2, nam::wavenet::Head1x1Params(true, 4, 2), secondary_activation,
+    shift_film, scale_film, shift_film, scale_film, shift_film, scale_film, shift_film, scale_film);
+
+  // rechannel 8 + two layers * 174 + biased head rechannel 15 + serialized head scale 1.
+  std::vector<float> exact_weights(372, 0.0f);
+  exact_weights.back() = 1.0f;
+  construct_wavenet(2, params, exact_weights);
+
+  auto short_weights = exact_weights;
+  short_weights.pop_back();
+  expect_model_rejected([&]() { construct_wavenet(2, params, short_weights); });
+
+  auto surplus_weights = exact_weights;
+  surplus_weights.push_back(0.0f);
+  expect_model_rejected([&]() { construct_wavenet(2, params, surplus_weights); });
+}
+
+void test_wavenet_rejects_short_and_surplus_weights()
+{
+  const std::vector<nam::wavenet::LayerArrayParams> params{make_simple_validation_params()};
+  // Simple model: rechannel 1 + layer 5 + head rechannel 1 + head scale 1.
+  construct_wavenet(1, params, std::vector<float>(8, 0.0f));
+  expect_model_rejected([&]() { construct_wavenet(1, params, std::vector<float>(7, 0.0f)); });
+  expect_model_rejected([&]() { construct_wavenet(1, params, std::vector<float>(9, 0.0f)); });
+}
+
+void test_wavenet_rejects_invalid_groups_dilations_and_gating()
+{
+  const std::vector<float> placeholder_weights(8, 0.0f);
+  expect_model_rejected([&]() {
+    const std::vector<nam::wavenet::LayerArrayParams> params{
+      make_simple_validation_params(1, 1, 1, 1, 1, std::vector<int>{1}, 0)};
+    construct_wavenet(1, params, placeholder_weights);
+  });
+  expect_model_rejected([&]() {
+    const std::vector<nam::wavenet::LayerArrayParams> params{
+      make_simple_validation_params(1, 1, 1, 1, 1, std::vector<int>{})};
+    construct_wavenet(1, params, placeholder_weights);
+  });
+  expect_model_rejected([&]() {
+    const std::vector<nam::wavenet::LayerArrayParams> params{
+      make_simple_validation_params(1, 1, 1, 1, 1, std::vector<int>{0})};
+    construct_wavenet(1, params, placeholder_weights);
+  });
+  expect_model_rejected([&]() {
+    const auto invalid_gating_mode = static_cast<nam::wavenet::GatingMode>(99);
+    const std::vector<nam::wavenet::LayerArrayParams> params{
+      make_simple_validation_params(1, 1, 1, 1, 1, std::vector<int>{1}, 1, invalid_gating_mode)};
+    construct_wavenet(1, params, placeholder_weights);
+  });
+  expect_model_rejected([&]() {
+    const std::vector<nam::wavenet::LayerArrayParams> params{
+      make_simple_validation_params(
+        1, 1, 1, 1, 1, std::vector<int>{std::numeric_limits<int>::max()}, 1,
+        nam::wavenet::GatingMode::NONE, 2)};
+    construct_wavenet(1, params, placeholder_weights);
+  });
+  expect_model_rejected([&]() {
+    const std::vector<nam::wavenet::LayerArrayParams> params{
+      make_simple_validation_params(5000, 5000, 1, 5000, 5000, std::vector<int>{1}, 5000)};
+    construct_wavenet(5000, params, placeholder_weights);
+  });
+  expect_model_rejected([&]() {
+    const std::vector<nam::wavenet::LayerArrayParams> params{
+      make_simple_validation_params(1, 1, 1, 16, 16, std::vector<int>(600, 1))};
+    construct_wavenet(1, params, placeholder_weights);
+  });
+}
+
+void test_wavenet_rejects_input_condition_and_head_chain_mismatches()
+{
+  const std::vector<float> placeholder_weights(64, 0.0f);
+  expect_model_rejected([&]() {
+    const std::vector<nam::wavenet::LayerArrayParams> params{
+      make_simple_validation_params(2, 1, 1, 1, 1)};
+    construct_wavenet(1, params, placeholder_weights);
+  });
+  expect_model_rejected([&]() {
+    const std::vector<nam::wavenet::LayerArrayParams> params{
+      make_simple_validation_params(1, 1, 1, 1, 1)};
+    construct_wavenet(1, params, placeholder_weights, 1);
+  });
+  expect_model_rejected([&]() {
+    std::vector<nam::wavenet::LayerArrayParams> params;
+    params.push_back(make_simple_validation_params(1, 1, 2, 3, 3));
+    params.push_back(make_simple_validation_params(4, 1, 1, 2, 2));
+    construct_wavenet(1, params, placeholder_weights);
+  });
+  expect_model_rejected([&]() {
+    std::vector<nam::wavenet::LayerArrayParams> params;
+    params.push_back(make_simple_validation_params(1, 1, 2, 3, 3));
+    params.push_back(make_simple_validation_params(3, 1, 1, 3, 3));
+    construct_wavenet(1, params, placeholder_weights);
+  });
+}
+
+void test_wavenet_rejects_head_film_without_head_projection()
+{
+  const auto inactive_film = nam::wavenet::_FiLMParams(false, false);
+  const auto active_film = nam::wavenet::_FiLMParams(true, false);
+  std::vector<nam::wavenet::LayerArrayParams> params;
+  params.emplace_back(
+    1, 1, 1, 1, 1, 1, std::vector<int>{1},
+    nam::activations::ActivationConfig::simple(nam::activations::ActivationType::ReLU),
+    nam::wavenet::GatingMode::NONE, false, 1, 1, 1, nam::wavenet::Head1x1Params(false, 1, 1),
+    nam::activations::ActivationConfig{}, inactive_film, inactive_film, inactive_film, inactive_film,
+    inactive_film, inactive_film, inactive_film, active_film);
+  expect_model_rejected([&]() { construct_wavenet(1, params, std::vector<float>(8, 0.0f)); });
+}
+
+void test_wavenet_counts_nested_linear_prewarm_compute()
+{
+  expect_model_rejected([]() {
+    const std::vector<nam::wavenet::LayerArrayParams> params{
+      make_simple_validation_params(1, 1, 1, 1, 1, std::vector<int>{100000}, 1,
+                                    nam::wavenet::GatingMode::NONE, 2)};
+    std::vector<float> linear_weights(50000, 0.0f);
+    std::unique_ptr<nam::DSP> condition_dsp =
+      std::make_unique<nam::Linear>(1, 1, 50000, false, linear_weights, 48000.0);
+    nam::wavenet::WaveNet model(
+      1, params, 1.0f, false, std::vector<float>{}, std::move(condition_dsp), 48000.0);
+  });
 }
 }; // namespace test_full
 

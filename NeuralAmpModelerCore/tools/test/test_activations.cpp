@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 #include <cmath>
+#include <limits>
 
 #include "NAM/activations.h"
 
@@ -193,6 +194,18 @@ public:
 
     assert(caught);
   }
+
+  static void test_single_slope_broadcast()
+  {
+    Eigen::MatrixXf data(2, 2);
+    data << -1.0f, 1.0f, -2.0f, 2.0f;
+    nam::activations::ActivationPReLU prelu(0.25f);
+    prelu.apply(data);
+    assert(fabs(data(0, 0) - (-0.25f)) < 1e-6);
+    assert(fabs(data(1, 0) - (-0.5f)) < 1e-6);
+    assert(data(0, 1) == 1.0f);
+    assert(data(1, 1) == 2.0f);
+  }
 };
 
 class TestTypedActivationConfig
@@ -322,6 +335,33 @@ public:
     assert(config.type == nam::activations::ActivationType::PReLU);
     assert(config.negative_slopes.has_value());
     assert(config.negative_slopes.value().size() == 4);
+  }
+
+  static void test_rejects_excessive_or_nonfinite_prelu_slopes()
+  {
+    nlohmann::json j = {{"type", "PReLU"}, {"negative_slopes", std::vector<float>(4097, 0.1f)}};
+    bool threw = false;
+    try
+    {
+      nam::activations::ActivationConfig::from_json(j);
+    }
+    catch (const std::exception&)
+    {
+      threw = true;
+    }
+    assert(threw);
+
+    j = {{"type", "PReLU"}, {"negative_slope", std::numeric_limits<double>::infinity()}};
+    threw = false;
+    try
+    {
+      nam::activations::ActivationConfig::from_json(j);
+    }
+    catch (const std::exception&)
+    {
+      threw = true;
+    }
+    assert(threw);
   }
 
   static void test_unknown_activation_throws()

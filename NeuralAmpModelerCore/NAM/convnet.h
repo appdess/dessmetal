@@ -151,17 +151,24 @@ public:
   /// \param maxBufferSize Maximum number of frames to process in a single call
   void SetMaxBufferSize(const int maxBufferSize) override;
 
+  std::size_t EstimatedOperationsPerSample() const override { return mEstimatedOperationsPerSample; }
+
 protected:
   std::vector<ConvNetBlock> _blocks;
   std::vector<Eigen::MatrixXf> _block_vals;
   Eigen::MatrixXf _head_output; // (out_channels, num_frames)
   _Head _head;
-  void _verify_weights(const int channels, const std::vector<int>& dilations, const bool batchnorm,
-                       const size_t actual_weights);
+  /// Validate every model-controlled dimension and the exact flattened weight
+  /// count before Buffer allocates storage or any weight iterator is consumed.
+  /// Returns the validated maximum dilation for Buffer's receptive field.
+  static int _verify_weights(const int in_channels, const int out_channels, const int channels,
+                             const std::vector<int>& dilations, const bool batchnorm, const int groups,
+                             const size_t actual_weights);
   void _update_buffers_(NAM_SAMPLE** input, const int num_frames) override;
   void _rewind_buffers_() override;
 
   int mPrewarmSamples = 0; // Pre-compute during initialization
+  std::size_t mEstimatedOperationsPerSample = 1U;
   int PrewarmSamples() override { return mPrewarmSamples; };
 };
 

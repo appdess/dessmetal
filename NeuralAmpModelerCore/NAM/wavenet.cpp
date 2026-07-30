@@ -1,18 +1,445 @@
-#include <algorithm>
+#include <cassert>
 #include <cmath>
-#include <iostream>
 #include <limits>
 #include <sstream>
+#include <utility>
 
 #include <Eigen/Dense>
 
 #include "get_dsp.h"
+#include "model_validation.h"
 #include "registry.h"
 #include "wavenet.h"
 
 namespace
 {
 constexpr int kMaxGlobalConditionSize = 64;
+constexpr std::size_t kMaxWaveNetReceptiveFieldSamples = 1U << 20;
+constexpr std::size_t kMaxWaveNetHistoryValues = 16U << 20;
+constexpr std::size_t kMaxWaveNetDenseValues = 32U << 20;
+constexpr std::size_t kMaxWaveNetRuntimeValues = 64U << 20;
+constexpr std::size_t kMaxWaveNetPrewarmWork = 64U << 20;
+constexpr std::size_t kValidationBufferFrames = 4096;
+
+struct WaveNetValidation
+{
+  std::size_t weight_count;
+  int prewarm_samples;
+  std::size_t operations_per_sample;
+};
+
+int validated_global_condition_size(const int global_condition_size)
+{
+  if (global_condition_size < 0 || global_condition_size > kMaxGlobalConditionSize)
+    throw std::invalid_argument("global_condition_size is outside the supported range");
+  return global_condition_size;
+}
+
+std::size_t count_grouped_linear_weights(const int in_channels, const int out_channels, const bool bias,
+                                         const int groups, const char* context)
+{
+  nam::model_validation::require_grouped_channels(in_channels, out_channels, groups, context);
+  const auto inputs_per_group = static_cast<std::size_t>(in_channels / groups);
+  const auto output_size = static_cast<std::size_t>(out_channels);
+  auto result = nam::model_validation::checked_multiply(output_size, inputs_per_group, context);
+  if (bias)
+    result = nam::model_validation::checked_add(result, output_size, context);
+  return result;
+}
+
+std::size_t count_grouped_conv_weights(const int in_channels, const int out_channels, const int kernel_size,
+                                       const bool bias, const int groups, const char* context)
+{
+  nam::model_validation::positive_dimension(kernel_size, "kernel_size");
+  auto result = count_grouped_linear_weights(in_channels, out_channels, false, groups, context);
+  result = nam::model_validation::checked_multiply(result, static_cast<std::size_t>(kernel_size), context);
+  if (bias)
+    result = nam::model_validation::checked_add(result, static_cast<std::size_t>(out_channels), context);
+  return result;
+}
+
+int checked_film_output_size(const int input_size, const nam::wavenet::_FiLMParams& params)
+{
+  const auto multiplier = static_cast<std::size_t>(params.shift ? 2 : 1);
+  const auto output_size = nam::model_validation::checked_multiply(
+    nam::model_validation::positive_dimension(input_size, "FiLM input_size"), multiplier, "WaveNet FiLM");
+  if (output_size > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+    throw std::invalid_argument("WaveNet FiLM output size is outside the supported range");
+  return static_cast<int>(output_size);
+}
+
+std::size_t count_film_weights(const int condition_size, const int input_size,
+                               const nam::wavenet::_FiLMParams& params)
+{
+  if (!params.active)
+    return 0;
+  return count_grouped_linear_weights(
+    condition_size, checked_film_output_size(input_size, params), true, 1, "WaveNet FiLM");
+}
+
+std::size_t count_film_runtime_rows(const int input_size, const nam::wavenet::_FiLMParams& params)
+{
+  if (!params.active)
+    return 0;
+  return nam::model_validation::checked_add(
+    static_cast<std::size_t>(checked_film_output_size(input_size, params)),
+    static_cast<std::size_t>(input_size), "WaveNet FiLM runtime storage");
+}
+
+WaveNetValidation validate_and_count_wavenet(
+  const int in_channels, const std::vector<nam::wavenet::LayerArrayParams>& layer_array_params,
+  const bool with_head, const nam::DSP* condition_dsp, const int condition_prewarm,
+  const int global_condition_size)
+{
+  nam::model_validation::positive_dimension(in_channels, "WaveNet in_channels");
+  if (layer_array_params.empty())
+    throw std::runtime_error("WaveNet requires at least one layer array");
+  if (with_head)
+    throw std::runtime_error("Head not implemented!");
+  if (global_condition_size < 0 || global_condition_size > kMaxGlobalConditionSize)
+    throw std::invalid_argument("global_condition_size is outside the supported range");
+
+  int base_condition_size = in_channels;
+  if (condition_dsp != nullptr)
+  {
+    if (condition_dsp->NumInputChannels() != in_channels)
+      throw std::runtime_error("WaveNet input channels do not match condition DSP input channels");
+    base_condition_size = condition_dsp->NumOutputChannels();
+  }
+  nam::model_validation::positive_dimension(base_condition_size, "WaveNet condition source size");
+  const auto expected_condition_size_value = nam::model_validation::checked_add(
+    static_cast<std::size_t>(base_condition_size), static_cast<std::size_t>(global_condition_size),
+    "WaveNet condition size");
+  if (expected_condition_size_value > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+    throw std::invalid_argument("WaveNet condition size is outside the supported range");
+  const int expected_condition_size = static_cast<int>(expected_condition_size_value);
+
+  // The final serialized float is the head scale. The condition DSP, if any,
+  // owns and validates its separate weight vector before reaching this model.
+  std::size_t total_weights = 1;
+  std::size_t total_dense_values = 0;
+  std::size_t total_runtime_rows = nam::model_validation::checked_add(
+    static_cast<std::size_t>(in_channels), static_cast<std::size_t>(expected_condition_size),
+    "WaveNet runtime storage");
+  std::size_t total_receptive_field = 0;
+  std::size_t total_history_values = 0;
+  std::size_t total_layer_count = 0;
+  int previous_channels = 0;
+  int previous_head_size = 0;
+
+  for (std::size_t array_index = 0; array_index < layer_array_params.size(); ++array_index)
+  {
+    const auto& params = layer_array_params[array_index];
+    nam::model_validation::positive_dimension(params.input_size, "WaveNet input_size");
+    nam::model_validation::positive_dimension(params.condition_size, "WaveNet condition_size");
+    nam::model_validation::positive_dimension(params.head_size, "WaveNet head_size");
+    nam::model_validation::positive_dimension(params.channels, "WaveNet channels");
+    nam::model_validation::positive_dimension(params.bottleneck, "WaveNet bottleneck");
+    nam::model_validation::positive_dimension(params.kernel_size, "WaveNet kernel_size");
+    if (params.dilations.empty())
+      throw std::invalid_argument("WaveNet layer arrays require at least one dilation");
+    total_layer_count = nam::model_validation::checked_add(
+      total_layer_count, params.dilations.size(), "WaveNet layer count");
+    const auto kernel_lookback =
+      nam::model_validation::positive_dimension(params.kernel_size, "WaveNet kernel_size") - 1U;
+    for (const int dilation : params.dilations)
+    {
+      const auto dilation_value = nam::model_validation::positive_dimension(dilation, "WaveNet dilation");
+      const auto layer_receptive_field = nam::model_validation::checked_multiply(
+        kernel_lookback, dilation_value, "WaveNet receptive field");
+      total_receptive_field = nam::model_validation::checked_add(
+        total_receptive_field, layer_receptive_field, "WaveNet receptive field");
+      total_history_values = nam::model_validation::checked_add(
+        total_history_values,
+        nam::model_validation::checked_multiply(
+          static_cast<std::size_t>(params.channels), layer_receptive_field, "WaveNet history storage"),
+        "WaveNet history storage");
+    }
+    if (total_receptive_field > kMaxWaveNetReceptiveFieldSamples
+        || total_history_values > kMaxWaveNetHistoryValues)
+    {
+      throw std::invalid_argument("WaveNet receptive field exceeds the supported resource limit");
+    }
+
+    bool doubled_bottleneck = false;
+    switch (params.gating_mode)
+    {
+      case nam::wavenet::GatingMode::NONE:
+        break;
+      case nam::wavenet::GatingMode::GATED:
+      case nam::wavenet::GatingMode::BLENDED:
+        doubled_bottleneck = true;
+        break;
+      default:
+        throw std::invalid_argument("WaveNet gating mode is invalid");
+    }
+
+    const auto convolution_output_size = nam::model_validation::checked_multiply(
+      static_cast<std::size_t>(params.bottleneck), static_cast<std::size_t>(doubled_bottleneck ? 2 : 1),
+      "WaveNet convolution output");
+    if (convolution_output_size > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+      throw std::invalid_argument("WaveNet convolution output size is outside the supported range");
+    const int convolution_outputs = static_cast<int>(convolution_output_size);
+
+    if (params.condition_size != expected_condition_size)
+      throw std::runtime_error(
+        "WaveNet layer condition_size does not match the condition source plus global condition");
+    const int expected_input_size = array_index == 0 ? in_channels : previous_channels;
+    if (params.input_size != expected_input_size)
+      throw std::runtime_error("WaveNet layer input_size does not match its input source");
+
+    nam::model_validation::require_grouped_channels(
+      params.channels, convolution_outputs, params.groups_input, "WaveNet input convolution");
+    nam::model_validation::require_grouped_channels(
+      params.condition_size, convolution_outputs, params.groups_input_mixin, "WaveNet input mixin");
+    nam::model_validation::require_grouped_channels(
+      params.bottleneck, params.channels, params.groups_1x1, "WaveNet residual 1x1");
+
+    int layer_head_size = params.bottleneck;
+    if (params.head1x1_params.active)
+    {
+      nam::model_validation::require_grouped_channels(
+        params.bottleneck, params.head1x1_params.out_channels, params.head1x1_params.groups,
+        "WaveNet head 1x1");
+      layer_head_size = params.head1x1_params.out_channels;
+    }
+    else if (params.head1x1_post_film_params.active)
+    {
+      throw std::invalid_argument("WaveNet post-head 1x1 FiLM requires an active head 1x1");
+    }
+
+    if (array_index > 0 && layer_head_size != previous_head_size)
+      throw std::runtime_error("WaveNet accumulated head size does not match the preceding layer array");
+
+    total_dense_values = nam::model_validation::checked_add(
+      total_dense_values,
+      count_grouped_linear_weights(params.input_size, params.channels, false, 1, "WaveNet dense rechannel"),
+      "WaveNet dense storage");
+    total_dense_values = nam::model_validation::checked_add(
+      total_dense_values,
+      count_grouped_linear_weights(layer_head_size, params.head_size, false, 1, "WaveNet dense head"),
+      "WaveNet dense storage");
+    total_runtime_rows = nam::model_validation::checked_add(
+      total_runtime_rows,
+      nam::model_validation::checked_add(
+        nam::model_validation::checked_multiply(
+          2U, static_cast<std::size_t>(params.channels), "WaveNet runtime storage"),
+        nam::model_validation::checked_add(
+          static_cast<std::size_t>(params.head_size), static_cast<std::size_t>(layer_head_size),
+          "WaveNet runtime storage"),
+        "WaveNet runtime storage"),
+      "WaveNet runtime storage");
+
+    total_weights = nam::model_validation::checked_add(
+      total_weights,
+      count_grouped_linear_weights(params.input_size, params.channels, false, 1, "WaveNet rechannel"),
+      "WaveNet weights");
+
+    std::size_t weights_per_layer = count_grouped_conv_weights(
+      params.channels, convolution_outputs, params.kernel_size, true, params.groups_input,
+      "WaveNet input convolution");
+    weights_per_layer = nam::model_validation::checked_add(
+      weights_per_layer,
+      count_grouped_linear_weights(
+        params.condition_size, convolution_outputs, false, params.groups_input_mixin, "WaveNet input mixin"),
+      "WaveNet layer weights");
+    weights_per_layer = nam::model_validation::checked_add(
+      weights_per_layer,
+      count_grouped_linear_weights(
+        params.bottleneck, params.channels, true, params.groups_1x1, "WaveNet residual 1x1"),
+      "WaveNet layer weights");
+    if (params.head1x1_params.active)
+    {
+      weights_per_layer = nam::model_validation::checked_add(
+        weights_per_layer,
+        count_grouped_linear_weights(
+          params.bottleneck, params.head1x1_params.out_channels, true, params.head1x1_params.groups,
+          "WaveNet head 1x1"),
+        "WaveNet layer weights");
+    }
+
+    std::size_t dense_values_per_layer = count_grouped_conv_weights(
+      params.channels, convolution_outputs, params.kernel_size, true, 1, "WaveNet dense input convolution");
+    dense_values_per_layer = nam::model_validation::checked_add(
+      dense_values_per_layer,
+      count_grouped_linear_weights(
+        params.condition_size, convolution_outputs, false, 1, "WaveNet dense input mixin"),
+      "WaveNet dense storage");
+    dense_values_per_layer = nam::model_validation::checked_add(
+      dense_values_per_layer,
+      count_grouped_linear_weights(params.bottleneck, params.channels, true, 1, "WaveNet dense residual"),
+      "WaveNet dense storage");
+    if (params.head1x1_params.active)
+    {
+      dense_values_per_layer = nam::model_validation::checked_add(
+        dense_values_per_layer,
+        count_grouped_linear_weights(
+          params.bottleneck, params.head1x1_params.out_channels, true, 1, "WaveNet dense head 1x1"),
+        "WaveNet dense storage");
+    }
+
+    weights_per_layer = nam::model_validation::checked_add(
+      weights_per_layer, count_film_weights(params.condition_size, params.channels, params.conv_pre_film_params),
+      "WaveNet layer weights");
+    weights_per_layer = nam::model_validation::checked_add(
+      weights_per_layer,
+      count_film_weights(params.condition_size, convolution_outputs, params.conv_post_film_params),
+      "WaveNet layer weights");
+    weights_per_layer = nam::model_validation::checked_add(
+      weights_per_layer,
+      count_film_weights(params.condition_size, params.condition_size, params.input_mixin_pre_film_params),
+      "WaveNet layer weights");
+    weights_per_layer = nam::model_validation::checked_add(
+      weights_per_layer,
+      count_film_weights(params.condition_size, convolution_outputs, params.input_mixin_post_film_params),
+      "WaveNet layer weights");
+    weights_per_layer = nam::model_validation::checked_add(
+      weights_per_layer,
+      count_film_weights(params.condition_size, convolution_outputs, params.activation_pre_film_params),
+      "WaveNet layer weights");
+    weights_per_layer = nam::model_validation::checked_add(
+      weights_per_layer,
+      count_film_weights(params.condition_size, params.bottleneck, params.activation_post_film_params),
+      "WaveNet layer weights");
+    weights_per_layer = nam::model_validation::checked_add(
+      weights_per_layer,
+      count_film_weights(params.condition_size, params.channels, params._1x1_post_film_params),
+      "WaveNet layer weights");
+    if (params.head1x1_post_film_params.active)
+    {
+      weights_per_layer = nam::model_validation::checked_add(
+        weights_per_layer,
+        count_film_weights(
+          params.condition_size, params.head1x1_params.out_channels, params.head1x1_post_film_params),
+        "WaveNet layer weights");
+    }
+
+    dense_values_per_layer = nam::model_validation::checked_add(
+      dense_values_per_layer, count_film_weights(params.condition_size, params.channels, params.conv_pre_film_params),
+      "WaveNet dense storage");
+    dense_values_per_layer = nam::model_validation::checked_add(
+      dense_values_per_layer,
+      count_film_weights(params.condition_size, convolution_outputs, params.conv_post_film_params),
+      "WaveNet dense storage");
+    dense_values_per_layer = nam::model_validation::checked_add(
+      dense_values_per_layer,
+      count_film_weights(params.condition_size, params.condition_size, params.input_mixin_pre_film_params),
+      "WaveNet dense storage");
+    dense_values_per_layer = nam::model_validation::checked_add(
+      dense_values_per_layer,
+      count_film_weights(params.condition_size, convolution_outputs, params.input_mixin_post_film_params),
+      "WaveNet dense storage");
+    dense_values_per_layer = nam::model_validation::checked_add(
+      dense_values_per_layer,
+      count_film_weights(params.condition_size, convolution_outputs, params.activation_pre_film_params),
+      "WaveNet dense storage");
+    dense_values_per_layer = nam::model_validation::checked_add(
+      dense_values_per_layer,
+      count_film_weights(params.condition_size, params.bottleneck, params.activation_post_film_params),
+      "WaveNet dense storage");
+    dense_values_per_layer = nam::model_validation::checked_add(
+      dense_values_per_layer,
+      count_film_weights(params.condition_size, params.channels, params._1x1_post_film_params),
+      "WaveNet dense storage");
+    if (params.head1x1_post_film_params.active)
+    {
+      dense_values_per_layer = nam::model_validation::checked_add(
+        dense_values_per_layer,
+        count_film_weights(
+          params.condition_size, params.head1x1_params.out_channels, params.head1x1_post_film_params),
+        "WaveNet dense storage");
+    }
+
+    std::size_t runtime_rows_per_layer = nam::model_validation::checked_add(
+      nam::model_validation::checked_multiply(
+        3U, static_cast<std::size_t>(params.channels), "WaveNet runtime storage"),
+      nam::model_validation::checked_add(
+        nam::model_validation::checked_multiply(
+          3U, static_cast<std::size_t>(convolution_outputs), "WaveNet runtime storage"),
+        static_cast<std::size_t>(layer_head_size), "WaveNet runtime storage"),
+      "WaveNet runtime storage");
+    runtime_rows_per_layer = nam::model_validation::checked_add(
+      runtime_rows_per_layer, count_film_runtime_rows(params.channels, params.conv_pre_film_params),
+      "WaveNet runtime storage");
+    runtime_rows_per_layer = nam::model_validation::checked_add(
+      runtime_rows_per_layer, count_film_runtime_rows(convolution_outputs, params.conv_post_film_params),
+      "WaveNet runtime storage");
+    runtime_rows_per_layer = nam::model_validation::checked_add(
+      runtime_rows_per_layer, count_film_runtime_rows(params.condition_size, params.input_mixin_pre_film_params),
+      "WaveNet runtime storage");
+    runtime_rows_per_layer = nam::model_validation::checked_add(
+      runtime_rows_per_layer, count_film_runtime_rows(convolution_outputs, params.input_mixin_post_film_params),
+      "WaveNet runtime storage");
+    runtime_rows_per_layer = nam::model_validation::checked_add(
+      runtime_rows_per_layer, count_film_runtime_rows(convolution_outputs, params.activation_pre_film_params),
+      "WaveNet runtime storage");
+    runtime_rows_per_layer = nam::model_validation::checked_add(
+      runtime_rows_per_layer, count_film_runtime_rows(params.bottleneck, params.activation_post_film_params),
+      "WaveNet runtime storage");
+    runtime_rows_per_layer = nam::model_validation::checked_add(
+      runtime_rows_per_layer, count_film_runtime_rows(params.channels, params._1x1_post_film_params),
+      "WaveNet runtime storage");
+    runtime_rows_per_layer = nam::model_validation::checked_add(
+      runtime_rows_per_layer,
+      count_film_runtime_rows(params.head1x1_params.out_channels, params.head1x1_post_film_params),
+      "WaveNet runtime storage");
+
+    total_dense_values = nam::model_validation::checked_add(
+      total_dense_values,
+      nam::model_validation::checked_multiply(
+        dense_values_per_layer, params.dilations.size(), "WaveNet dense storage"),
+      "WaveNet dense storage");
+    total_runtime_rows = nam::model_validation::checked_add(
+      total_runtime_rows,
+      nam::model_validation::checked_multiply(
+        runtime_rows_per_layer, params.dilations.size(), "WaveNet runtime storage"),
+      "WaveNet runtime storage");
+
+    total_weights = nam::model_validation::checked_add(
+      total_weights,
+      nam::model_validation::checked_multiply(
+        weights_per_layer, params.dilations.size(), "WaveNet layer-array weights"),
+      "WaveNet weights");
+    total_weights = nam::model_validation::checked_add(
+      total_weights,
+      count_grouped_linear_weights(layer_head_size, params.head_size, params.head_bias, 1, "WaveNet head rechannel"),
+      "WaveNet weights");
+
+    previous_channels = params.channels;
+    previous_head_size = params.head_size;
+  }
+  if (total_dense_values > kMaxWaveNetDenseValues)
+    throw std::invalid_argument("WaveNet dense storage exceeds the supported resource limit");
+  const auto total_runtime_values = nam::model_validation::checked_add(
+    nam::model_validation::checked_multiply(
+      total_runtime_rows, kValidationBufferFrames, "WaveNet runtime storage"),
+    nam::model_validation::checked_multiply(2U, total_history_values, "WaveNet runtime storage"),
+    "WaveNet runtime storage");
+  if (total_runtime_values > kMaxWaveNetRuntimeValues)
+    throw std::invalid_argument("WaveNet runtime storage exceeds the supported resource limit");
+  if (condition_prewarm < 0)
+    throw std::invalid_argument("WaveNet condition prewarm must not be negative");
+  const auto total_prewarm = nam::model_validation::checked_add(
+    static_cast<std::size_t>(condition_prewarm), total_receptive_field, "WaveNet prewarm");
+  if (total_prewarm > kMaxWaveNetReceptiveFieldSamples
+      || total_prewarm > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+  {
+    throw std::invalid_argument("WaveNet prewarm exceeds the supported resource limit");
+  }
+  const auto prewarm_work =
+    nam::model_validation::checked_multiply(total_layer_count, total_prewarm, "WaveNet prewarm work");
+  if (prewarm_work > kMaxWaveNetPrewarmWork)
+    throw std::invalid_argument("WaveNet prewarm work exceeds the supported resource limit");
+  const std::size_t condition_operations =
+    condition_dsp == nullptr ? 0U : condition_dsp->EstimatedOperationsPerSample();
+  const std::size_t operations_per_sample = nam::model_validation::checked_add(
+    total_dense_values, condition_operations, "WaveNet operations per sample");
+  const std::size_t prewarm_compute = nam::model_validation::checked_multiply(
+    operations_per_sample, total_prewarm, "WaveNet prewarm compute");
+  if (prewarm_compute > nam::model_validation::kMaxPrewarmComputeOperations)
+    throw std::invalid_argument("WaveNet prewarm compute exceeds the supported resource limit");
+  return {total_weights, static_cast<int>(total_prewarm), operations_per_sample};
+}
 }
 
 // Layer ======================================================================
@@ -356,45 +783,20 @@ nam::wavenet::WaveNet::WaveNet(const int in_channels,
       expected_sample_rate)
 , _condition_dsp(std::move(condition_dsp))
 , _head_scale(head_scale)
-, _global_condition_size(global_condition_size)
-, _default_global_condition(static_cast<size_t>(std::max(0, global_condition_size)), 0.5)
+, _global_condition_size(validated_global_condition_size(global_condition_size))
+, _default_global_condition(static_cast<size_t>(_global_condition_size), 0.5)
 {
-  if (_global_condition_size < 0 || _global_condition_size > kMaxGlobalConditionSize)
-    throw std::invalid_argument("global_condition_size is outside the supported range");
-  // Assert that if there's a condition DSP, its input is compatible with what it'll get from this WaveNet:
-  if (this->_condition_dsp != nullptr)
-  {
-    if (this->_get_condition_dim() != this->_condition_dsp->NumInputChannels())
-    {
-      std::stringstream ss;
-      ss << "input channels of WaveNet (" << in_channels << ") don't match input channels of condition DSP ("
-         << this->_condition_dsp->NumInputChannels() << "!\n";
-      throw std::runtime_error(ss.str().c_str());
-    }
-  }
-  if (layer_array_params.empty())
-    throw std::runtime_error("WaveNet requires at least one layer array");
-  if (with_head)
-    throw std::runtime_error("Head not implemented!");
+  // Validate the complete outer model before constructing any nested arrays or
+  // handing their unchecked set_weights_ methods an iterator.
+  const int condition_prewarm = this->_condition_dsp != nullptr ? this->_condition_dsp->PrewarmSamples() : 1;
+  const auto validation = validate_and_count_wavenet(
+    in_channels, layer_array_params, with_head, this->_condition_dsp.get(), condition_prewarm,
+    this->_global_condition_size);
+  nam::model_validation::require_exact_weight_count("WaveNet", validation.weight_count, weights.size());
+  this->mEstimatedOperationsPerSample = validation.operations_per_sample;
+
   for (size_t i = 0; i < layer_array_params.size(); i++)
   {
-    // Quick assert that the condition_dsp will output compatibly with this layer array
-    if (this->_condition_dsp != nullptr)
-    {
-      const int conditionDSPOutputs = this->_condition_dsp->NumOutputChannels();
-      if (conditionDSPOutputs < 0
-          || conditionDSPOutputs > std::numeric_limits<int>::max() - this->_global_condition_size)
-        throw std::invalid_argument("Condition DSP output size is outside the supported range");
-      const int expectedConditionSize = conditionDSPOutputs + this->_global_condition_size;
-      if (layer_array_params[i].condition_size != expectedConditionSize)
-      {
-        std::stringstream ss;
-        ss << "condition_size of layer " << i << " (" << layer_array_params[i].condition_size
-           << ") doesn't match output channels of condition DSP plus global conditioning (" << expectedConditionSize
-           << "!\n";
-        throw std::runtime_error(ss.str().c_str());
-      }
-    }
     this->_layer_arrays.push_back(nam::wavenet::_LayerArray(
       layer_array_params[i].input_size, layer_array_params[i].condition_size, layer_array_params[i].head_size,
       layer_array_params[i].channels, layer_array_params[i].bottleneck, layer_array_params[i].kernel_size,
@@ -406,21 +808,11 @@ nam::wavenet::WaveNet::WaveNet(const int in_channels,
       layer_array_params[i].input_mixin_post_film_params, layer_array_params[i].activation_pre_film_params,
       layer_array_params[i].activation_post_film_params, layer_array_params[i]._1x1_post_film_params,
       layer_array_params[i].head1x1_post_film_params));
-    if (i > 0)
-      if (layer_array_params[i].channels != layer_array_params[i - 1].head_size)
-      {
-        std::stringstream ss;
-        ss << "channels of layer " << i << " (" << layer_array_params[i].channels
-           << ") doesn't match head_size of preceding layer (" << layer_array_params[i - 1].head_size << "!\n";
-        throw std::runtime_error(ss.str().c_str());
-      }
   }
   this->set_weights_(weights);
 
   // Finally, figure out how much pre-warming is needed for this model.
-  mPrewarmSamples = this->_condition_dsp != nullptr ? this->_condition_dsp->PrewarmSamples() : 1;
-  for (size_t i = 0; i < this->_layer_arrays.size(); i++)
-    mPrewarmSamples += this->_layer_arrays[i].get_receptive_field();
+  mPrewarmSamples = validation.prewarm_samples;
 }
 
 void nam::wavenet::WaveNet::set_weights_(std::vector<float>& weights)
@@ -431,18 +823,9 @@ void nam::wavenet::WaveNet::set_weights_(std::vector<float>& weights)
   for (size_t i = 0; i < this->_layer_arrays.size(); i++)
     this->_layer_arrays[i].set_weights_(it);
   this->_head_scale = *(it++); // TODO `LayerArray.absorb_head_scale()`
-  if (it != weights.end())
-  {
-    std::stringstream ss;
-    for (size_t i = 0; i < weights.size(); i++)
-      if (weights[i] == *it)
-      {
-        ss << "Weight mismatch: assigned " << i + 1 << " weights, but " << weights.size() << " were provided.";
-        throw std::runtime_error(ss.str().c_str());
-      }
-    ss << "Weight mismatch: provided " << weights.size() << " weights, but the model expects more.";
-    throw std::runtime_error(ss.str().c_str());
-  }
+  // The outer constructor has already required the exact checked count before
+  // this unchecked iterator consumer runs.
+  assert(it == weights.end());
 }
 
 void nam::wavenet::WaveNet::SetMaxBufferSize(const int maxBufferSize)
@@ -622,13 +1005,13 @@ void nam::wavenet::WaveNet::_process(NAM_SAMPLE** input, NAM_SAMPLE** output, co
 std::unique_ptr<nam::DSP> nam::wavenet::Factory(const nlohmann::json& config, std::vector<float>& weights,
                                                 const double expectedSampleRate)
 {
-  const int global_condition_size = config.value("global_condition_size", 0);
+  const int global_condition_size = model_validation::json_integer_value(config, "global_condition_size", 0);
   if (global_condition_size < 0 || global_condition_size > kMaxGlobalConditionSize)
     throw std::invalid_argument("global_condition_size is outside the supported range");
   std::unique_ptr<nam::DSP> condition_dsp = nullptr;
   if (config.find("condition_dsp") != config.end())
   {
-    const nlohmann::json& condition_dsp_json = config["condition_dsp"];
+    const nlohmann::json& condition_dsp_json = config.at("condition_dsp");
     condition_dsp = nam::get_dsp(condition_dsp_json);
     if (condition_dsp->GetExpectedSampleRate() != expectedSampleRate)
     {
@@ -639,47 +1022,51 @@ std::unique_ptr<nam::DSP> nam::wavenet::Factory(const nlohmann::json& config, st
     }
   }
   std::vector<nam::wavenet::LayerArrayParams> layer_array_params;
-  for (size_t i = 0; i < config["layers"].size(); i++)
+  const nlohmann::json& layers = config.at("layers");
+  for (size_t i = 0; i < layers.size(); i++)
   {
-    nlohmann::json layer_config = config["layers"][i];
+    nlohmann::json layer_config = layers.at(i);
 
-    const int groups = layer_config.value("groups_input", 1); // defaults to 1
-    const int groups_input_mixin = layer_config.value("groups_input_mixin", 1); // defaults to 1
-    const int groups_1x1 = layer_config.value("groups_1x1", 1); // defaults to 1
+    const int groups = model_validation::json_integer_value(layer_config, "groups_input", 1); // defaults to 1
+    const int groups_input_mixin =
+      model_validation::json_integer_value(layer_config, "groups_input_mixin", 1); // defaults to 1
+    const int groups_1x1 = model_validation::json_integer_value(layer_config, "groups_1x1", 1); // defaults to 1
 
-    const int channels = layer_config["channels"];
-    const int bottleneck = layer_config.value("bottleneck", channels); // defaults to channels if not present
+    const int channels = model_validation::json_integer_at(layer_config, "channels");
+    const int bottleneck =
+      model_validation::json_integer_value(layer_config, "bottleneck", channels); // defaults to channels
 
-    const int input_size = layer_config["input_size"];
-    const int layer_global_condition_size = layer_config.value("global_condition_size", global_condition_size);
+    const int input_size = model_validation::json_integer_at(layer_config, "input_size");
+    const int layer_global_condition_size =
+      model_validation::json_integer_value(layer_config, "global_condition_size", global_condition_size);
     if (layer_global_condition_size != global_condition_size)
       throw std::invalid_argument("Inconsistent global_condition_size in WaveNet layer configuration");
-    const int base_condition_size = layer_config["condition_size"].get<int>();
+    const int base_condition_size = model_validation::json_integer_at(layer_config, "condition_size");
     if (base_condition_size < 0 || base_condition_size > std::numeric_limits<int>::max() - global_condition_size)
       throw std::invalid_argument("WaveNet condition_size is outside the supported range");
     const int condition_size = base_condition_size + global_condition_size;
-    const int head_size = layer_config["head_size"];
-    const int kernel_size = layer_config["kernel_size"];
-    const auto dilations = layer_config["dilations"];
+    const int head_size = model_validation::json_integer_at(layer_config, "head_size");
+    const int kernel_size = model_validation::json_integer_at(layer_config, "kernel_size");
+    std::vector<int> dilations = model_validation::json_integer_vector_at(layer_config, "dilations");
     // Parse JSON into typed ActivationConfig at model loading boundary
     const activations::ActivationConfig activation_config =
-      activations::ActivationConfig::from_json(layer_config["activation"]);
+      activations::ActivationConfig::from_json(layer_config.at("activation"));
     // Parse gating mode - support both old "gated" boolean and new "gating_mode" string
     GatingMode gating_mode = GatingMode::NONE;
     activations::ActivationConfig secondary_activation_config;
 
     if (layer_config.find("gating_mode") != layer_config.end())
     {
-      std::string gating_mode_str = layer_config["gating_mode"].get<std::string>();
+      std::string gating_mode_str = layer_config.at("gating_mode").get<std::string>();
       if (gating_mode_str == "gated")
       {
         gating_mode = GatingMode::GATED;
-        secondary_activation_config = activations::ActivationConfig::from_json(layer_config["secondary_activation"]);
+        secondary_activation_config = activations::ActivationConfig::from_json(layer_config.at("secondary_activation"));
       }
       else if (gating_mode_str == "blended")
       {
         gating_mode = GatingMode::BLENDED;
-        secondary_activation_config = activations::ActivationConfig::from_json(layer_config["secondary_activation"]);
+        secondary_activation_config = activations::ActivationConfig::from_json(layer_config.at("secondary_activation"));
       }
       else if (gating_mode_str == "none")
       {
@@ -692,7 +1079,7 @@ std::unique_ptr<nam::DSP> nam::wavenet::Factory(const nlohmann::json& config, st
     else if (layer_config.find("gated") != layer_config.end())
     {
       // Backward compatibility: convert old "gated" boolean to new enum
-      bool gated = layer_config["gated"];
+      bool gated = layer_config.at("gated");
       gating_mode = gated ? GatingMode::GATED : GatingMode::NONE;
       if (gated)
       {
@@ -705,7 +1092,7 @@ std::unique_ptr<nam::DSP> nam::wavenet::Factory(const nlohmann::json& config, st
       throw std::invalid_argument("No information on gating mode found for layer array " + std::to_string(i));
     }
 
-    const bool head_bias = layer_config["head_bias"];
+    const bool head_bias = layer_config.at("head_bias");
 
     // Parse head1x1 parameters
     bool head1x1_active = false;
@@ -713,20 +1100,20 @@ std::unique_ptr<nam::DSP> nam::wavenet::Factory(const nlohmann::json& config, st
     int head1x1_groups = 1;
     if (layer_config.find("head_1x1") != layer_config.end())
     {
-      const auto& head1x1_config = layer_config["head_1x1"];
-      head1x1_active = head1x1_config["active"];
-      head1x1_out_channels = head1x1_config["out_channels"];
-      head1x1_groups = head1x1_config["groups"];
+      const auto& head1x1_config = layer_config.at("head_1x1");
+      head1x1_active = head1x1_config.at("active");
+      head1x1_out_channels = model_validation::json_integer_at(head1x1_config, "out_channels");
+      head1x1_groups = model_validation::json_integer_at(head1x1_config, "groups");
     }
     nam::wavenet::Head1x1Params head1x1_params(head1x1_active, head1x1_out_channels, head1x1_groups);
 
     // Helper function to parse FiLM parameters
     auto parse_film_params = [&layer_config](const std::string& key) -> nam::wavenet::_FiLMParams {
-      if (layer_config.find(key) == layer_config.end() || layer_config[key] == false)
+      if (layer_config.find(key) == layer_config.end() || layer_config.at(key) == false)
       {
         return nam::wavenet::_FiLMParams(false, false);
       }
-      const nlohmann::json& film_config = layer_config[key];
+      const nlohmann::json& film_config = layer_config.at(key);
       bool active = film_config.value("active", true);
       bool shift = film_config.value("shift", true);
       return nam::wavenet::_FiLMParams(active, shift);
@@ -743,19 +1130,19 @@ std::unique_ptr<nam::DSP> nam::wavenet::Factory(const nlohmann::json& config, st
     nam::wavenet::_FiLMParams head1x1_post_film_params = parse_film_params("head1x1_post_film");
 
     layer_array_params.push_back(nam::wavenet::LayerArrayParams(
-      input_size, condition_size, head_size, channels, bottleneck, kernel_size, dilations, activation_config,
+      input_size, condition_size, head_size, channels, bottleneck, kernel_size, std::move(dilations), activation_config,
       gating_mode, head_bias, groups, groups_input_mixin, groups_1x1, head1x1_params, secondary_activation_config,
       conv_pre_film_params, conv_post_film_params, input_mixin_pre_film_params, input_mixin_post_film_params,
       activation_pre_film_params, activation_post_film_params, _1x1_post_film_params, head1x1_post_film_params));
   }
-  const bool with_head = !config["head"].is_null();
-  const float head_scale = config["head_scale"];
+  const bool with_head = !config.at("head").is_null();
+  const float head_scale = model_validation::json_float_at(config, "head_scale");
 
   if (layer_array_params.empty())
     throw std::runtime_error("WaveNet config requires at least one layer array");
 
   // Backward compatibility: assume 1 input channel
-  const int in_channels = config.value("in_channels", 1);
+  const int in_channels = model_validation::json_integer_value(config, "in_channels", 1);
 
   // out_channels is determined from last layer array's head_size
   return std::make_unique<nam::wavenet::WaveNet>(

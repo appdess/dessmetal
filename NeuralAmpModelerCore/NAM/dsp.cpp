@@ -2,27 +2,76 @@
 #include <cmath> // pow, tanh, expf
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 
 #include "dsp.h"
+#include "model_validation.h"
 #include "registry.h"
 
 #define tanh_impl_ std::tanh
 // #define tanh_impl_ fast_tanh_
 
 constexpr const long _INPUT_BUFFER_SAFETY_FACTOR = 32;
+constexpr double _MAX_EXPECTED_SAMPLE_RATE = 768000.0;
+constexpr int _MAX_MODEL_IO_CHANNELS = 4096;
+constexpr int _MAX_PROCESS_BUFFER_FRAMES = 1 << 20;
+constexpr std::size_t _MAX_PREWARM_BUFFER_VALUES = 16U << 20;
+
+namespace
+{
+constexpr std::size_t kMaxLinearBufferValues = 16U << 20;
+
+float checked_level_value(const double value, const char* name)
+{
+  if (!std::isfinite(value) || std::abs(value) > static_cast<double>(std::numeric_limits<float>::max()))
+    throw std::invalid_argument(std::string(name) + " must be finite and representable as a float");
+  return static_cast<float>(value);
+}
+
+int validate_linear_model(const int in_channels, const int out_channels, const int receptive_field, const bool bias,
+                          const std::size_t actual_weights)
+{
+  using nam::model_validation::checked_add;
+  using nam::model_validation::checked_multiply;
+  using nam::model_validation::positive_dimension;
+
+  const std::size_t input_channels = positive_dimension(in_channels, "Linear in_channels");
+  positive_dimension(out_channels, "Linear out_channels");
+  const std::size_t field = positive_dimension(receptive_field, "Linear receptive_field");
+  const std::size_t expected_weights = checked_add(field, bias ? 1U : 0U, "Linear weights");
+  nam::model_validation::require_exact_weight_count("Linear", expected_weights, actual_weights);
+
+  const std::size_t buffer_values = checked_multiply(
+    input_channels, checked_multiply(static_cast<std::size_t>(_INPUT_BUFFER_SAFETY_FACTOR), field, "Linear buffer"),
+    "Linear buffer");
+  if (buffer_values > kMaxLinearBufferValues
+      || field > static_cast<std::size_t>(std::numeric_limits<int>::max() / _INPUT_BUFFER_SAFETY_FACTOR))
+  {
+    throw std::invalid_argument("Linear buffer exceeds the supported resource limit");
+  }
+  return receptive_field;
+}
+}
 
 nam::DSP::DSP(const int in_channels, const int out_channels, const double expected_sample_rate)
 : mExpectedSampleRate(expected_sample_rate)
 , mInChannels(in_channels)
 , mOutChannels(out_channels)
 {
-  if (in_channels <= 0 || out_channels <= 0)
+  if (in_channels <= 0 || out_channels <= 0 || in_channels > _MAX_MODEL_IO_CHANNELS
+      || out_channels > _MAX_MODEL_IO_CHANNELS)
   {
-    throw std::runtime_error("Channel counts must be positive");
+    throw std::runtime_error("Channel counts are outside the supported range");
+  }
+  if (expected_sample_rate != NAM_UNKNOWN_EXPECTED_SAMPLE_RATE
+      && (!std::isfinite(expected_sample_rate) || expected_sample_rate <= 0.0
+          || expected_sample_rate > _MAX_EXPECTED_SAMPLE_RATE))
+  {
+    throw std::invalid_argument("Expected sample rate is outside the supported range");
   }
 }
 
@@ -37,6 +86,12 @@ void nam::DSP::prewarm()
     return;
 
   const size_t bufferSize = std::max(mMaxBufferSize, 1);
+  const std::size_t channel_count = model_validation::checked_add(
+    static_cast<std::size_t>(mInChannels), static_cast<std::size_t>(mOutChannels), "Prewarm channel count");
+  const std::size_t prewarm_values =
+    model_validation::checked_multiply(channel_count, bufferSize, "Prewarm buffers");
+  if (prewarm_values > _MAX_PREWARM_BUFFER_VALUES)
+    throw std::invalid_argument("Prewarm buffers exceed the supported resource limit");
   // Allocate buffers for all channels
   std::vector<std::vector<NAM_SAMPLE>> inputBuffers(mInChannels);
   std::vector<std::vector<NAM_SAMPLE>> outputBuffers(mOutChannels);
@@ -102,12 +157,16 @@ void nam::DSP::Reset(const double sampleRate, const int maxBufferSize)
 
 void nam::DSP::SetLoudness(const double loudness)
 {
+  if (!std::isfinite(loudness))
+    throw std::invalid_argument("Loudness must be finite");
   mLoudness = loudness;
   mHasLoudness = true;
 }
 
 void nam::DSP::SetMaxBufferSize(const int maxBufferSize)
 {
+  if (maxBufferSize <= 0 || maxBufferSize > _MAX_PROCESS_BUFFER_FRAMES)
+    throw std::invalid_argument("Maximum buffer size is outside the supported range");
   mMaxBufferSize = maxBufferSize;
 }
 
@@ -133,14 +192,16 @@ bool nam::DSP::HasOutputLevel()
 
 void nam::DSP::SetInputLevel(const double inputLevel)
 {
+  const float checked_level = checked_level_value(inputLevel, "Input level");
   mInputLevel.haveLevel = true;
-  mInputLevel.level = inputLevel;
+  mInputLevel.level = checked_level;
 }
 
 void nam::DSP::SetOutputLevel(const double outputLevel)
 {
+  const float checked_level = checked_level_value(outputLevel, "Output level");
   mOutputLevel.haveLevel = true;
-  mOutputLevel.level = outputLevel;
+  mOutputLevel.level = checked_level;
 }
 
 // Buffer =====================================================================
@@ -253,13 +314,10 @@ void nam::Buffer::_advance_input_buffer_(const int num_frames)
 
 nam::Linear::Linear(const int in_channels, const int out_channels, const int receptive_field, const bool _bias,
                     const std::vector<float>& weights, const double expected_sample_rate)
-: nam::Buffer(in_channels, out_channels, receptive_field, expected_sample_rate)
+: nam::Buffer(in_channels, out_channels,
+              validate_linear_model(in_channels, out_channels, receptive_field, _bias, weights.size()),
+              expected_sample_rate)
 {
-  if ((int)weights.size() != (receptive_field + (_bias ? 1 : 0)))
-    throw std::runtime_error(
-      "Params vector does not match expected size based "
-      "on architecture parameters");
-
   this->_weight.resize(this->_receptive_field);
   // Pass in in reverse order so that dot products work out of the box.
   for (int i = 0; i < this->_receptive_field; i++)
@@ -304,11 +362,11 @@ void nam::Linear::process(NAM_SAMPLE** input, NAM_SAMPLE** output, const int num
 std::unique_ptr<nam::DSP> nam::linear::Factory(const nlohmann::json& config, std::vector<float>& weights,
                                                const double expectedSampleRate)
 {
-  const int receptive_field = config["receptive_field"];
-  const bool bias = config["bias"];
+  const int receptive_field = model_validation::json_integer_at(config, "receptive_field");
+  const bool bias = config.at("bias");
   // Default to 1 channel in/out for backward compatibility
-  const int in_channels = config.value("in_channels", 1);
-  const int out_channels = config.value("out_channels", 1);
+  const int in_channels = model_validation::json_integer_value(config, "in_channels", 1);
+  const int out_channels = model_validation::json_integer_value(config, "out_channels", 1);
   return std::make_unique<nam::Linear>(in_channels, out_channels, receptive_field, bias, weights, expectedSampleRate);
 }
 
@@ -318,17 +376,10 @@ std::unique_ptr<nam::DSP> nam::linear::Factory(const nlohmann::json& config, std
 
 nam::Conv1x1::Conv1x1(const int in_channels, const int out_channels, const bool _bias, const int groups)
 {
-  // Validate that channels divide evenly by groups
-  if (in_channels % groups != 0)
-  {
-    throw std::runtime_error("in_channels (" + std::to_string(in_channels) + ") must be divisible by numGroups ("
-                             + std::to_string(groups) + ")");
-  }
-  if (out_channels % groups != 0)
-  {
-    throw std::runtime_error("out_channels (" + std::to_string(out_channels) + ") must be divisible by numGroups ("
-                             + std::to_string(groups) + ")");
-  }
+  model_validation::require_grouped_channels(in_channels, out_channels, groups, "Conv1x1");
+  const auto dense_values = model_validation::checked_multiply(
+    static_cast<std::size_t>(in_channels), static_cast<std::size_t>(out_channels), "Conv1x1 dense storage");
+  model_validation::require_dense_layer_limit(dense_values, "Conv1x1");
 
   this->_num_groups = groups;
   this->_weight.resize(out_channels, in_channels);
