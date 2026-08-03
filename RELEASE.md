@@ -1,5 +1,66 @@
 # DessMetal macOS release guide
 
+## 0.2.0 transpose feature-branch validation through 2026-08-03
+
+This section records development evidence for the open-source transpose work on
+`codex/transpose-engine-spike`. It is not a release approval. The exact product build below is unsigned, has not
+been submitted to Apple, and belongs to clean feature commit `0b6cca85015261551eb286e2d34ebc56ec2f4352` rather
+than to a tag or published release. Its source-archive SHA-256 is
+`d2d533642990bcc2009d70fa41576f3210f074878794b2c0a323fefb21ab3430`.
+
+### Transpose implementation and compatibility
+
+DessMetal 0.2.0 adds integer real-time transpose from -12 through +12 semitones before the existing amp path. The
+processor uses an 83-band ERB-spaced analytic filter bank with separate transient and body resolutions, continuous
+phase evolution, and an 8 ms wet/dry transition. It performs no allocation in `Process()`, requires no look-ahead,
+and leaves the existing 27-sample host-visible plug-in latency unchanged. After a transition to zero completes, the
+dry samples are copied exactly instead of remaining in the filter-bank path.
+
+The topology is implemented in DessMetal and derived from the MIT-licensed Terrarium Poly Pitch design by Steven
+Schulteis. The complete upstream license is shipped as `licenses/terrarium-poly-octave-MIT.txt` and included in the
+packaged third-party notices. The evaluated Signalsmith Stretch prototype was rejected and is not included in the
+product source or distributable bundle.
+
+The persisted layout is versioned as 0.2.0 with Transpose appended as parameter 21. The existing parameter IDs and
+order, four visible amp choices, and hidden fifth amp compatibility state are preserved. Migration tests accept the
+legacy 14-parameter layout and both 20-parameter 0.1.x layouts, accept the new 21-parameter layout, and reject invalid
+or ambiguous byte counts atomically.
+
+| Area | Status | Exact feature-branch evidence |
+| --- | --- | --- |
+| Core/model suite | Pass | Current clean source rerun completed successfully |
+| WAV parser suite | Pass | Current malicious/truncated corpus rerun completed; the deliberate non-WAVE fixture emitted its expected rejection diagnostic |
+| Transpose DSP | Pass | Every integer shift at 48 kHz; finite, non-silent, bounded output at 44.1/48/88.2/96 kHz; open-string extrema; onset, automation, block-size invariance, exact-zero dry path, invalid values, and zero render-thread allocations |
+| State compatibility | Pass | Legacy 14, 20-parameter 0.1.0/0.1.1, current 21-parameter 0.2.0, optional VST3 bypass suffix, and atomic rejection cases |
+| Universal APP/AU/VST3 | Pass | All exact staged executables contain `x86_64 arm64`, report 0.2.0, and came from the clean commit above |
+| Audio Unit | Pass | Strict `auval`, 15-second stress render, installed-AU migrations, and offline transpose render; 27 reported latency samples and 0 dB target-carrier deficit at both octave extrema |
+| VST3 | Pass | Official Steinberg 3.8 extensive validator: 537 tests passed and 0 failed; 22 exposed parameters including the wrapper bypass |
+| Native UI | Pass | Large full-height minus/value/plus control with 54 px decrement and increment hit regions, exercised at native plug-in size |
+| Logic Pro | Pass | Exact installed AU binary matched the staged AU; -12 and +12 produced finite, non-silent playback; +12 survived save/quit/reopen; final project state returned to 0 |
+| Package pipeline | Pass, unsigned only | `./package_mac.sh --unsigned` completed from the clean feature commit and promoted the complete six-file local-validation set |
+| Human listening | Still required | Signal behavior and persistence are verified; tone, feel, transient preference, and mix translation remain subjective owner decisions |
+| GitHub PR/security gate | Pending | No branch push or pull request is claimed by this local build record |
+
+The disposable Logic project is `melodic-core-DessMetal-0.2-demo.logicx`, beside the untouched
+`melodic-core.logicx` original. Its 50.52625-second reference bounce is 24-bit, 48 kHz stereo PCM. The demo guitars
+use DessMetal only; previous guitar amp plug-ins are bypassed and the muted MIDI guitar tracks remain muted. The
+bounce measured -19.0 LUFS integrated, 11.5 LU loudness range, and -3.0 dBFS true peak. Those measurements establish
+level and headroom, not a subjective mix or tone verdict.
+
+### Exact unsigned artifact envelope
+
+| File | SHA-256 |
+| --- | --- |
+| `DessMetal-v0.2.0-mac-UNSIGNED-VALIDATION-ONLY.pkg` | `051b394d4050e9804fb2db8c12a5c5c5f1c27b88fef385f7b691ca5c2c753035` |
+| `DessMetal-v0.2.0-mac-UNSIGNED-VALIDATION-ONLY.dmg` | `19717300a250595a2ab837ea869b2e2770242f922cff2c43d965a45071d5211b` |
+| `DessMetal-v0.2.0-mac-UNSIGNED-VALIDATION-ONLY-dSYMs.zip` | `1680450d5f7d286c4e667686c26216c0ccf4b6949fd0f4715c689880e682dbe9` |
+| `DessMetal-v0.2.0-mac-UNSIGNED-VALIDATION-ONLY-ARTIFACTS.txt` | `9082da3300e52d36c3f909012b134a51046025c6accdd01fb7589d6825cb7aff` |
+
+The staged and Logic-installed AU executables both have SHA-256
+`0b0c37436e79e0af3ae8e2e49abf62f60ed319386462df99112d2e77c74b051d`. Any later source, packaged-document, or
+security-remediation commit requires a fresh exact-current package run before the artifact envelope can be promoted
+as evidence for that later commit.
+
 ## Local validation and verified replacement status through 2026-07-29
 
 The results below apply to the 0.1.1 product source and the locally staged bundles from the fix-introducing build
