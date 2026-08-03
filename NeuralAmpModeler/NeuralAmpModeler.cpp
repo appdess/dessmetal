@@ -185,12 +185,21 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
   GetParam(kBoostModel)->InitEnum("Boost Model", 0, {"OD808", "SD1", "TS9", "aesahaettr"});
 
   GetParam(kNAMActive)->InitBool("Amp Enabled", true); // Default Amp On
+  GetParam(kTransposeSemitones)->InitInt("Transpose", 0, -12, 12, "st");
+  GetParam(kTransposeSemitones)->SetDisplayFunc([](const double value, WDL_String& display) {
+    const int semitones = static_cast<int>(std::lround(value));
+    if (semitones > 0)
+      display.SetFormatted(16, "+%d", semitones);
+    else
+      display.SetFormatted(16, "%d", semitones);
+  });
 
   mAmpModelIdx.store(GetParam(kAmpModel)->Int(), std::memory_order_relaxed);
   mAmpActiveTarget.store(GetParam(kNAMActive)->Bool(), std::memory_order_relaxed);
   mBoostModelIdx.store(GetParam(kBoostModel)->Int(), std::memory_order_relaxed);
   mBoostActiveTarget.store(GetParam(kBoostActive)->Bool(), std::memory_order_relaxed);
   mIRActiveTarget.store(GetParam(kIRToggle)->Bool(), std::memory_order_relaxed);
+  mTransposeSemitones.store(GetParam(kTransposeSemitones)->Int(), std::memory_order_relaxed);
 
   mNoiseGateTrigger.AddListener(&mNoiseGateGain);
   mCurrentParams.resize(1, 0.5); // Init params
@@ -301,6 +310,7 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     // the amp controls. It avoids squeezing long model names into a small menu.
     const auto ampModelLabelArea = IRECT(370, 132, 455, 164);
     const auto ampModelSwitchArea = IRECT(455, 132, 910, 164);
+    const auto transposeArea = IRECT(74, 110, 336, 178);
 
     // Text-labelled effect buttons share one clear row on the lower amp panel.
     const auto ampBypassArea = IRECT(400, 294, 530, 359);
@@ -373,6 +383,26 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     const auto driveMenuStyle =
       actionButtonStyle.WithValueText(IText(14.f, EAlign::Center, COLOR_WHITE));
     const auto pedalKnobStyle = style.WithShowLabel(false).WithShowValue(false);
+    const auto transposeStyle =
+      style.WithShowLabel(true)
+        .WithShowValue(true)
+        .WithDrawFrame(true)
+        .WithDrawShadows(false)
+        .WithEmboss(false)
+        .WithRoundness(0.18f)
+        .WithFrameThickness(1.f)
+        .WithWidgetFrac(0.70f)
+        .WithColor(kBG, COLOR_BLACK.WithOpacity(0.72f))
+        .WithColor(kFG, PluginColors::NAM_THEMECOLOR.WithOpacity(0.82f))
+        .WithColor(kFR, COLOR_WHITE.WithOpacity(0.28f))
+        .WithColor(kHL, COLOR_WHITE.WithOpacity(0.12f))
+        .WithLabelText(IText(13.f, EAlign::Center, PluginColors::NAM_THEMEFONTCOLOR))
+        .WithValueText(IText(17.f, EAlign::Center, COLOR_WHITE));
+
+    auto* transposeControl =
+      pGraphics->AttachControl(new NAMTransposeControl(transposeArea, kTransposeSemitones, transposeStyle));
+    transposeControl->SetTooltip(
+      "Retune the guitar from -12 to +12 semitones. Double-click to return to standard pitch.");
 
     auto* irSwitchControl = pGraphics->AttachControl(
       new IVToggleControl(irSwitchArea, kIRToggle, "", actionButtonStyle, "CAB IR OFF", "CAB IR ON"));
@@ -614,6 +644,11 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
     }
   }
 
+  // Retune the calibrated mono guitar before every nonlinear stage. The
+  // filter bank has no buffered look-ahead, so this does not change host PDC.
+  mTransposeProcessor.ProcessInPlace(
+    mInputPointers[0], nFrames, mTransposeSemitones.load(std::memory_order_acquire));
+
   const bool noiseGateActive = GetParam(kNoiseGateActive)->Value();
   const bool toneStackActive = GetParam(kEQActive)->Value();
 
@@ -764,6 +799,8 @@ void NeuralAmpModeler::OnReset()
   mNoiseGateTrigger.PrepareBuffers(kNumChannelsInternal, maxBlockSize);
   mNoiseGateGain.PrepareBuffers(kNumChannelsInternal, maxBlockSize);
   mHighPass.PrepareBuffers(kNumChannelsInternal, maxBlockSize);
+  mTransposeSemitones.store(GetParam(kTransposeSemitones)->Int(), std::memory_order_release);
+  mTransposeProcessor.Reset(sampleRate, mTransposeSemitones.load(std::memory_order_acquire));
 
   const double bass = GetParam(kToneBass)->Value();
   const double middle = GetParam(kToneMid)->Value();
@@ -1098,12 +1135,17 @@ void NeuralAmpModeler::OnUIOpen()
   }
   
   const WDL_String boostPath = _GetBoostNAMPathSnapshot();
-  if (boostPath.GetLength())
+  // The fixed drive selector replaced the historical Boost file browser. Old
+  // standalone preferences can still contain a path, so never message the
+  // removed control during editor attachment.
+  if (boostPath.GetLength() && GetUI() != nullptr
+      && GetUI()->GetControlWithTag(kCtrlTagBoostModelFileBrowser) != nullptr)
   {
-      SendControlMsgFromDelegate(kCtrlTagBoostModelFileBrowser, kMsgTagLoadedBoostModel, boostPath.GetLength(), boostPath.Get());
-      if (mBoostModel.load(std::memory_order_acquire) == nullptr
-          && mPendingBoostModel.load(std::memory_order_acquire) == nullptr)
-          SendControlMsgFromDelegate(kCtrlTagBoostModelFileBrowser, kMsgTagLoadFailed);
+    SendControlMsgFromDelegate(kCtrlTagBoostModelFileBrowser, kMsgTagLoadedBoostModel, boostPath.GetLength(),
+                               boostPath.Get());
+    if (mBoostModel.load(std::memory_order_acquire) == nullptr
+        && mPendingBoostModel.load(std::memory_order_acquire) == nullptr)
+      SendControlMsgFromDelegate(kCtrlTagBoostModelFileBrowser, kMsgTagLoadFailed);
   }
 }
 
@@ -1165,6 +1207,9 @@ void NeuralAmpModeler::OnParamChange(int paramIdx)
       mIRLoadRequest.fetch_add(1, std::memory_order_release);
       break;
     }
+    case kTransposeSemitones:
+      mTransposeSemitones.store(GetParam(kTransposeSemitones)->Int(), std::memory_order_release);
+      break;
 
     // Changes to the input gain
     case kCalibrateInput:
@@ -1961,6 +2006,8 @@ void NeuralAmpModeler::_UpdateLatency()
       && mModelMetadataEpoch.load(std::memory_order_relaxed) == mAudioConfigEpoch.load(std::memory_order_acquire))
     latency += mModelMetadataLatency.load(std::memory_order_relaxed);
   // Other things that add latency here...
+  // Transpose uses causal analytic filters without a buffered look-ahead, so
+  // its host-reported latency is intentionally zero at every semitone value.
 
   // Feels weird to have to do this.
   if (GetLatency() != latency)

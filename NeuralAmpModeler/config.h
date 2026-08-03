@@ -1,7 +1,7 @@
 #define PLUG_NAME "DessMetal"
 #define PLUG_MFR "Alexander Dess"
-#define PLUG_VERSION_HEX 0x000101
-#define PLUG_VERSION_STR "0.1.1"
+#define PLUG_VERSION_HEX 0x000200
+#define PLUG_VERSION_STR "0.2.0"
 #define PLUG_UNIQUE_ID '1YEo'
 #define PLUG_MFR_ID 'AdMs'
 #define PLUG_URL_STR "https://github.com/appdess/dessmetal"

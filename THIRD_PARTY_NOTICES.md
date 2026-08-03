@@ -19,6 +19,7 @@ projects; their full license files are retained in the source tree and copied in
 | RtAudio | MIT-style | `iPlug2/Dependencies/IPlug/RTAudio/doc/doxygen/license.txt` |
 | RtMidi | MIT-style | `licenses/RtMidi-MIT.txt` |
 | stb_textedit | MIT (selected from dual-license terms) | `licenses/stb-MIT.txt` |
+| Terrarium Poly Pitch-derived ERB filter-bank topology | MIT | `licenses/terrarium-poly-octave-MIT.txt` |
 | Roboto Regular | Apache-2.0 | Font data copyright Google 2012; `NeuralAmpModelerCore/Dependencies/eigen/COPYING.APACHE` (renamed in the DMG license set) |
 | Michroma Regular | SIL Open Font License 1.1 | Copyright 2011 The Michroma Project Authors; `iPlug2/Dependencies/IGraphics/NanoVG/example/LICENSE_OFL.txt` (license text) |
 

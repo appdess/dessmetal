@@ -12,6 +12,7 @@ It started from the open-source [Neural Amp Modeler](https://github.com/sdatkins
 - Four drive models: **OD808**, **SD1**, **TS9**, and **aesahaettr**
 - Sixteen cabinet impulse responses
 - Noise gate, three-band EQ, input and output controls
+- Real-time polyphonic retuning from one octave down to one octave up
 - Separate Drive, Amp, EQ, and Cabinet bypass controls
 - Standalone app, Audio Unit v2, and VST3 plug-in
 
@@ -43,8 +44,9 @@ Logic Pro uses the Audio Unit. Other hosts may use either AUv2 or VST3.
 
 1. Connect your guitar through an audio interface and set a healthy input level without clipping.
 2. Open the standalone app, or add DessMetal to an audio track in your DAW.
-3. Pick an amp, choose a drive if you want one, and move the Gain knob.
-4. Try the cabinet IRs, EQ, and bypass switches to shape the full signal path.
+3. Use the large Transpose minus/plus buttons when a song needs another tuning; `0` is the exact dry pitch path.
+4. Pick an amp, choose a drive if you want one, and move the Gain knob.
+5. Try the cabinet IRs, EQ, and bypass switches to shape the full signal path.
 
 The settings page also includes input calibration and output modes for rigs that need more careful level matching.
 
@@ -61,6 +63,7 @@ cmake --build /tmp/dessmetal-core-build --target run_tests -j 8
 
 bash AudioDSPTools/tests/run_wav_tests.sh
 bash NeuralAmpModeler/tests/run_unserialization_layout_tests.sh
+bash NeuralAmpModeler/tests/run_transpose_processor_tests.sh
 ```
 
 Build the universal standalone app, AUv2, VST3, installer, and DMG without release credentials:

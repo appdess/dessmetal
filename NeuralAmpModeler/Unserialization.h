@@ -51,6 +51,33 @@ inline constexpr std::array<std::string_view, 20> kCurrent01ParameterNames{
   "Amp Enabled",
 };
 
+// DessMetal 0.2 appends Transpose without changing any established host
+// parameter identifier. New parameters must continue to be appended here and
+// in EParams so positional state remains deterministic.
+inline constexpr std::array<std::string_view, 21> kCurrent02ParameterNames{
+  "Input",
+  "Gain",
+  "Threshold",
+  "Bass",
+  "Middle",
+  "Treble",
+  "Output",
+  "Boost Level",
+  "Boost Tone",
+  "NoiseGateActive",
+  "ToneStack",
+  "Boost",
+  "BoostOutput",
+  "IRToggle",
+  "Boost Model",
+  "CalibrateInput",
+  "InputCalibrationLevel",
+  "OutputMode",
+  "Amp Model",
+  "Amp Enabled",
+  "Transpose",
+};
+
 struct NamedDefault
 {
   std::string_view name;
@@ -76,6 +103,12 @@ enum class ParameterLayout01
   UnsupportedWip18,
   UnsupportedWip19,
   Current20,
+};
+
+enum class ParameterLayout02
+{
+  Invalid,
+  Current21,
 };
 
 inline constexpr std::size_t ParameterBytes(const std::size_t parameterCount)
@@ -109,6 +142,14 @@ inline constexpr ParameterLayout01 DetectParameterLayout01(const std::size_t rem
   if (allowLegacy010 && MatchesParameterPayload(remainingBytes, 19, allowVST3BypassSuffix))
     return ParameterLayout01::UnsupportedWip19;
   return ParameterLayout01::Invalid;
+}
+
+inline constexpr ParameterLayout02 DetectParameterLayout02(const std::size_t remainingBytes,
+                                                            const bool allowVST3BypassSuffix)
+{
+  return MatchesParameterPayload(remainingBytes, kCurrent02ParameterNames.size(), allowVST3BypassSuffix)
+           ? ParameterLayout02::Current21
+           : ParameterLayout02::Invalid;
 }
 
 // The original DessMetal enum was DessTortion=0, DessBlock=1. The current

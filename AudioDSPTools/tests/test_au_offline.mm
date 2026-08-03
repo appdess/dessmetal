@@ -20,6 +20,7 @@ constexpr AudioUnitParameterID kIRToggleParameter = 13;
 constexpr AudioUnitParameterID kDriveModelParameter = 14;
 constexpr AudioUnitParameterID kAmpModelParameter = 18;
 constexpr AudioUnitParameterID kAmpActiveParameter = 19;
+constexpr AudioUnitParameterID kTransposeParameter = 20;
 
 struct InputState
 {
@@ -63,6 +64,23 @@ AudioStreamBasicDescription MakeFormat(const UInt32 channels)
   format.mChannelsPerFrame = channels;
   format.mBitsPerChannel = 8 * sizeof(float);
   return format;
+}
+
+double ToneMagnitude(const std::vector<float>& signal, const double frequency)
+{
+  double real = 0.0;
+  double imaginary = 0.0;
+  double windowSum = 0.0;
+  for (std::size_t index = 0; index < signal.size(); ++index)
+  {
+    const double window = 0.5 - 0.5 * std::cos(2.0 * M_PI * index / (signal.size() - 1));
+    const double angle = 2.0 * M_PI * frequency * index / kSampleRate;
+    const double sample = signal[index] * window;
+    real += sample * std::cos(angle);
+    imaginary -= sample * std::sin(angle);
+    windowSum += window;
+  }
+  return 2.0 * std::hypot(real, imaginary) / windowSum;
 }
 } // namespace
 
@@ -137,7 +155,8 @@ int main()
   bool finite = true;
   UInt32 renderedBlocks = 0;
   const auto renderBlocks = [&](const UInt32 blockCount, double& measuredPeak, double* maxAdjacentStep = nullptr,
-                                double* previousLeftSample = nullptr) {
+                                double* previousLeftSample = nullptr,
+                                std::vector<float>* capturedLeft = nullptr) {
     measuredPeak = 0.0;
     if (maxAdjacentStep != nullptr)
       *maxAdjacentStep = 0.0;
@@ -153,6 +172,8 @@ int main()
       AudioUnitRenderActionFlags flags = 0;
       if (!Check(AudioUnitRender(unit, &flags, &timestamp, 0, kFramesPerBlock, &output.list), "AudioUnitRender"))
         return false;
+      if (capturedLeft != nullptr)
+        capturedLeft->insert(capturedLeft->end(), left.begin(), left.end());
       for (const float sample : left)
       {
         finite = finite && std::isfinite(sample);
@@ -274,6 +295,74 @@ int main()
     return 1;
   }
 
+  // Exercise the exact installed AU's new processing path with the nonlinear
+  // stages bypassed. The target carrier must dominate nearby output at both
+  // octave extremes, automation must remain bounded, and host PDC must not
+  // change with the transpose value.
+  std::vector<double> transposeCarrierDeficits;
+  double transposeMaxStep = 0.0;
+  if (!Check(AudioUnitSetParameter(unit, kDriveActiveParameter, kAudioUnitScope_Global, 0, 0.0f, 0),
+             "disable drive for transpose test"))
+  {
+    dispose();
+    return 1;
+  }
+  for (const int semitones : {-12, 12})
+  {
+    double transitionPeak = 0.0;
+    double transitionStep = 0.0;
+    std::vector<float> captured;
+    captured.reserve(64 * kFramesPerBlock);
+    if (!Check(AudioUnitSetParameter(unit, kTransposeParameter, kAudioUnitScope_Global, 0,
+                                     static_cast<AudioUnitParameterValue>(semitones), 0),
+               "set transpose")
+        || !renderBlocks(16, transitionPeak, &transitionStep, &bypassPreviousSample)
+        || !renderBlocks(64, transitionPeak, nullptr, nullptr, &captured))
+    {
+      dispose();
+      return 1;
+    }
+    transposeMaxStep = std::max(transposeMaxStep, transitionStep);
+    const double expectedHz = 220.0 * std::pow(2.0, semitones / 12.0);
+    const double targetMagnitude = ToneMagnitude(captured, expectedHz);
+    double strongestMagnitude = 0.0;
+    for (double candidate = expectedHz * 0.85; candidate <= expectedHz * 1.15; candidate += 0.25)
+      strongestMagnitude = std::max(strongestMagnitude, ToneMagnitude(captured, candidate));
+    const double carrierDeficit = 20.0 * std::log10(std::max(strongestMagnitude, 1.0e-15)
+                                                     / std::max(targetMagnitude, 1.0e-15));
+    transposeCarrierDeficits.push_back(carrierDeficit);
+    if (targetMagnitude < 1.0e-5 || carrierDeficit > 3.0)
+    {
+      std::cerr << "Transpose " << semitones << " target carrier failed: magnitude=" << targetMagnitude
+                << " deficit=" << carrierDeficit << " dB\n";
+      dispose();
+      return 1;
+    }
+  }
+
+  Float64 latencyAfterTransposeSeconds = 0.0;
+  UInt32 latencyAfterTransposeSize = sizeof(latencyAfterTransposeSeconds);
+  if (!Check(AudioUnitGetProperty(unit, kAudioUnitProperty_Latency, kAudioUnitScope_Global, 0,
+                                  &latencyAfterTransposeSeconds, &latencyAfterTransposeSize),
+             "get latency after transpose")
+      || std::abs(latencyAfterTransposeSeconds - latencySeconds) > (0.5 / kSampleRate)
+      || transposeMaxStep > 0.25)
+  {
+    std::cerr << "Transpose automation changed latency or continuity: latency="
+              << latencyAfterTransposeSeconds * kSampleRate << " samples, max-step=" << transposeMaxStep << '\n';
+    dispose();
+    return 1;
+  }
+
+  double transposeBypassPeak = 0.0;
+  if (!Check(AudioUnitSetParameter(unit, kTransposeParameter, kAudioUnitScope_Global, 0, 0.0f, 0),
+             "reset transpose")
+      || !renderBlocks(8, transposeBypassPeak))
+  {
+    dispose();
+    return 1;
+  }
+
   Float64 latencyDuringBypassSelectionSeconds = 0.0;
   UInt32 latencyDuringBypassSelectionSize = sizeof(latencyDuringBypassSelectionSeconds);
   if (!Check(AudioUnitGetProperty(unit, kAudioUnitProperty_Latency, kAudioUnitScope_Global, 0,
@@ -339,6 +428,8 @@ int main()
             << ", SickDess=" << sickDessPeak << ", drive models=" << drivePeaks[0] << "/" << drivePeaks[1]
             << "/" << drivePeaks[2] << "/" << drivePeaks[3]
             << ", bypass model-switch max-step=" << modelSwitchBypassMaxStep << ", latency="
-            << latencySeconds * kSampleRate << " samples, elapsed=" << elapsed << "s\n";
+            << latencySeconds * kSampleRate << " samples, transpose deficits="
+            << transposeCarrierDeficits[0] << "/" << transposeCarrierDeficits[1]
+            << " dB, transpose max-step=" << transposeMaxStep << ", elapsed=" << elapsed << "s\n";
   return 0;
 }

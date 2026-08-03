@@ -94,6 +94,32 @@ verify_release_path_ancestors()
   }
 }
 
+detach_disk_image_mapping()
+{
+  local image_path="$1"
+  local device
+
+  # DiskImages can briefly leave a just-created UDZO image mapped without a
+  # mount point. Signing or verifying during that window fails with
+  # "Resource temporarily unavailable". Eject only the whole-disk mappings
+  # that hdiutil reports for this exact build output; simulator and unrelated
+  # user images are never touched.
+  while IFS= read -r device; do
+    [[ "$device" =~ ^/dev/disk[0-9]+$ ]] || continue
+    hdiutil detach "$device" >/dev/null
+  done < <(
+    hdiutil info | awk -v target="$image_path" '
+      $1 == "image-path" {
+        current = substr($0, index($0, ":") + 2)
+        selected = (current == target)
+        next
+      }
+      selected && /^=+$/ { exit }
+      selected && $1 ~ /^\/dev\/disk[0-9]+$/ { print $1 }
+    '
+  )
+}
+
 verify_release_cleanup_path()
 {
   local checkout_root="$1"
@@ -1011,6 +1037,7 @@ ditto "$repo_root/iPlug2/Dependencies/IPlug/RTAudio/doc/doxygen/license.txt" "$l
 ditto "$repo_root/licenses/RtMidi-MIT.txt" "$licenses_dir/RtMidi-MIT.txt"
 ditto "$repo_root/licenses/nlohmann-json-MIT.txt" "$licenses_dir/nlohmann-json-MIT.txt"
 ditto "$repo_root/licenses/stb-MIT.txt" "$licenses_dir/stb-MIT.txt"
+ditto "$repo_root/licenses/terrarium-poly-octave-MIT.txt" "$licenses_dir/terrarium-poly-octave-MIT.txt"
 
 git_status="clean"
 if [[ -n "$(git -C "$repo_root" status --porcelain --untracked-files=normal)" ]]; then
@@ -1029,6 +1056,7 @@ fi
 } > "$dmg_source/BUILD-INFO.txt"
 
 hdiutil create -quiet -format UDZO -srcfolder "$dmg_source" -volname "DessMetal $version" "$dmg_work"
+detach_disk_image_mapping "$dmg_work"
 if [[ "$mode" == "signed" ]]; then
   codesign --force --timestamp --sign "$app_identity" "$dmg_work"
 else
