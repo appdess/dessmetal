@@ -7,7 +7,7 @@
 	<key>CFBundleExecutable</key>
 	<string>DessMetal</string>
 	<key>CFBundleGetInfoString</key>
-	<string>DessMetal v0.1.1 Copyright 2026 Alexander Dess; Original content Copyright Steven Atkinson</string>
+	<string>DessMetal v0.2.0 Copyright 2026 Alexander Dess; Original content Copyright Steven Atkinson</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.AlexanderDess.app.DessMetal.AUv3</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -17,9 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>XPC!</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.1</string>
+	<string>0.2.0</string>
 	<key>CFBundleVersion</key>
-	<string>0.1.1</string>
+	<string>0.2.0</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>10.12.0</string>
 	<key>NSExtension</key>
@@ -48,7 +48,7 @@
 					<key>type</key>
 					<string>aufx</string>
 					<key>version</key>
-					<integer>257</integer>
+					<integer>512</integer>
 				</dict>
 			</array>
 		</dict>

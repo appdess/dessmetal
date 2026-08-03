@@ -122,6 +122,44 @@ int _UnserializePathsAndExpectedKeys(const iplug::IByteChunk& chunk, int startPo
   return _UnserializeExpectedKeys(chunk, pos, config, paramNames);
 }
 
+// DessMetal 0.2 establishes the 21-value layout with Transpose appended after
+// every 0.1 host parameter. Accept only its exact payload shape.
+int _GetConfigFrom_0_2_x(const iplug::IByteChunk& chunk, int startPos, nlohmann::json& config)
+{
+#if defined(VST3_API) || defined(VST3C_API) || defined(VST3P_API)
+  constexpr bool allowVST3BypassSuffix = true;
+#else
+  constexpr bool allowVST3BypassSuffix = false;
+#endif
+
+  int pos = _UnserializePaths(chunk, startPos, config);
+  const auto remainingBytes = static_cast<std::size_t>(chunk.Size() - pos);
+  if (dessmetal::state::DetectParameterLayout02(remainingBytes, allowVST3BypassSuffix)
+      != dessmetal::state::ParameterLayout02::Current21)
+  {
+    std::ostringstream message;
+    message << "Unsupported DessMetal 0.2.x parameter layout: " << remainingBytes
+            << " bytes remain; expected "
+            << dessmetal::state::ParameterBytes(dessmetal::state::kCurrent02ParameterNames.size());
+    if (allowVST3BypassSuffix)
+      message << " plus an optional " << dessmetal::state::kVST3BypassSuffixBytes
+              << "-byte VST3 bypass value";
+    throw std::runtime_error(message.str());
+  }
+
+  pos = _UnserializeExpectedKeys(chunk, pos, config, dessmetal::state::kCurrent02ParameterNames);
+  const auto parameterBytes =
+    dessmetal::state::ParameterBytes(dessmetal::state::kCurrent02ParameterNames.size());
+  if (remainingBytes == parameterBytes + dessmetal::state::kVST3BypassSuffixBytes)
+  {
+    std::int32_t bypass = 0;
+    const int suffixEnd = chunk.Get(&bypass, pos);
+    if (suffixEnd < 0 || (bypass != 0 && bypass != 1))
+      throw std::runtime_error("Preset contains an invalid VST3 bypass suffix");
+  }
+  return pos;
+}
+
 // DessMetal 0.1.0 was built with both a 14-parameter and a later
 // 20-parameter positional layout. Distinguish them by the exact bytes remaining
 // after the two bounded path strings; never reinterpret a partial layout.
@@ -354,7 +392,11 @@ int NeuralAmpModeler::_UnserializeStateWithKnownVersion(const iplug::IByteChunk&
   _Version version(versionStr);
   // Act accordingly
   nlohmann::json config;
-  if (version.GetMajor() == 0 && version.GetMinor() == 1)
+  if (version.GetMajor() == 0 && version.GetMinor() == 2)
+  {
+    pos = _GetConfigFrom_0_2_x(chunk, pos, config);
+  }
+  else if (version.GetMajor() == 0 && version.GetMinor() == 1)
   {
     // Only 0.1.0 emitted the historical 14-value layout. 0.1.1 establishes
     // the current 20-value layout while still accepting existing 20-value
@@ -377,6 +419,10 @@ int NeuralAmpModeler::_UnserializeStateWithKnownVersion(const iplug::IByteChunk&
   {
     throw std::runtime_error("Unsupported preset version: " + versionStr);
   }
+  // Every state predating 0.2 must deterministically bypass the newly added
+  // processor, even when a host restores into an already-used instance.
+  if (!config.contains("Transpose"))
+    config["Transpose"] = 0.0;
   _UnserializeApplyConfig(config);
   return pos;
 }
@@ -385,6 +431,7 @@ int NeuralAmpModeler::_UnserializeStateWithUnknownVersion(const iplug::IByteChun
 {
   nlohmann::json config;
   int pos = _GetConfigFrom_Earlier(chunk, startPos, config);
+  config["Transpose"] = 0.0;
   _UnserializeApplyConfig(config);
   return pos;
 }

@@ -59,8 +59,10 @@ jobs:
             echo "- \`git archive\` SHA-256: \`$source_hash\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Versioned state-layout migration tests
-        run: bash NeuralAmpModeler/tests/run_unserialization_layout_tests.sh
+      - name: Versioned state-layout and transpose DSP tests
+        run: |
+          bash NeuralAmpModeler/tests/run_unserialization_layout_tests.sh
+          bash NeuralAmpModeler/tests/run_transpose_processor_tests.sh
 
       - name: Python trainer security regression tests
         run: |
@@ -89,6 +91,7 @@ jobs:
             AudioDSPTools/tests/run_wav_tests.sh \
             AudioDSPTools/tests/run_au_offline_test.sh \
             NeuralAmpModeler/tests/run_unserialization_layout_tests.sh \
+            NeuralAmpModeler/tests/run_transpose_processor_tests.sh \
             NeuralAmpModeler/tests/run_au_state_migration_test.sh
           plutil -lint NeuralAmpModeler/resources/*.plist NeuralAmpModeler/resources/DessMetal-macOS-release.entitlements
           version="$DESSMETAL_VERSION"
@@ -174,7 +177,7 @@ jobs:
           mkdir -p "$dmg_mount"
           hdiutil attach -readonly -nobrowse -mountpoint "$dmg_mount" "$dmg"
           trap 'hdiutil detach "$dmg_mount" >/dev/null 2>&1 || true' EXIT
-          for license in RtAudio-MIT.txt RtMidi-MIT.txt nlohmann-json-MIT.txt stb-MIT.txt; do
+          for license in RtAudio-MIT.txt RtMidi-MIT.txt nlohmann-json-MIT.txt stb-MIT.txt terrarium-poly-octave-MIT.txt; do
             test -f "$dmg_mount/THIRD_PARTY_LICENSES/$license"
           done
           hdiutil detach "$dmg_mount"

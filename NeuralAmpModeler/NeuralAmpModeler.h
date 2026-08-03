@@ -14,6 +14,7 @@
 
 #include "Colors.h"
 #include "ToneStack.h"
+#include "TransposeProcessor.h"
 
 #include "IPlug_include_in_plug_hdr.h"
 #include "ISender.h"
@@ -57,6 +58,8 @@ enum EParams
   // restores the owner-authored SickDess capture.
   kAmpModel,
   kNAMActive, // Bypass NAM Processing
+  // Append new host parameters after the complete 0.1 layout.
+  kTransposeSemitones,
   kNumParams
 };
 
@@ -418,6 +421,7 @@ private:
   // Noise gates
   dsp::noise_gate::Trigger mNoiseGateTrigger;
   dsp::noise_gate::Gain mNoiseGateGain;
+  dessmetal::transpose::Processor mTransposeProcessor;
   // Live DSP pointers are owned by the plug-in, but are intentionally raw:
   // ProcessBlock may swap them without running a destructor. Producers publish
   // complete objects through the atomic pending slots; the serialized loader
@@ -486,6 +490,7 @@ private:
   std::atomic<int> mBoostModelIdx{0};
   std::atomic<bool> mBoostActiveTarget{false};
   std::atomic<bool> mIRActiveTarget{true};
+  std::atomic<int> mTransposeSemitones{0};
   std::atomic<double> mTargetGain{0.5};
   std::atomic<double> mAudioSampleRate{48000.0};
   std::atomic<int> mAudioMaxBlockSize{2048};

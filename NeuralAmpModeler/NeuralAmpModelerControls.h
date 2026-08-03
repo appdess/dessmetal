@@ -4,6 +4,7 @@
 #include <sstream> // std::stringstream
 #include <unordered_map> // std::unordered_map
 #include "IControls.h"
+#include "IVNumberBoxControl.h"
 
 #define PLUG() static_cast<PLUG_CLASS_NAME*>(GetDelegate())
 #define NAM_KNOB_HEIGHT 120.0f
@@ -100,6 +101,69 @@ public:
     g.DrawText(IText(14.f, EAlign::Center,
                      (enabled ? COLOR_WHITE : IColor(255, 235, 195, 197)).WithOpacity(disabledOpacity)),
                enabled ? "AMP ON" : "AMP BYPASS", stateArea, &mBlend);
+  }
+};
+
+class NAMTransposeControl : public IVNumberBoxControl
+{
+public:
+  NAMTransposeControl(const IRECT& bounds, const int paramIdx, const IVStyle& style)
+    : IVNumberBoxControl(bounds, paramIdx, nullptr, "TRANSPOSE", style, true, 0.0, -12.0, 12.0,
+                         "%+.0f", false)
+  {
+  }
+
+  void OnAttached() override
+  {
+    IVNumberBoxControl::OnAttached();
+
+    // The stock number-box stacks two half-height buttons on the right. That
+    // works for mouse-heavy desktop utilities, but it is unnecessarily fiddly
+    // for a control guitarists may change mid-session. Keep the parameter and
+    // host-notification behavior from IVNumberBoxControl while giving both
+    // directions a full-height, 54 px target and a more legible glyph.
+    const auto buttonStyle =
+      mStyle.WithShowLabel(true)
+        .WithShowValue(false)
+        .WithWidgetFrac(1.f)
+        .WithLabelText(IText(25.f, EAlign::Center, COLOR_WHITE))
+        .WithValueText(IText(25.f, EAlign::Center, COLOR_WHITE));
+    mDecButton->SetStyle(buttonStyle);
+    mIncButton->SetStyle(buttonStyle);
+    OnResize();
+  }
+
+  void OnResize() override
+  {
+    MakeRects(mRECT, false);
+
+    auto sections = mWidgetBounds.GetPadded(-1.f);
+    constexpr float buttonWidth = 54.f;
+    constexpr float controlGap = 4.f;
+    const auto decBounds = sections.GetFromLeft(buttonWidth);
+    const auto incBounds = sections.GetFromRight(buttonWidth);
+    const auto valueBounds = IRECT(decBounds.R + controlGap, sections.T,
+                                   incBounds.L - controlGap, sections.B);
+
+    if (mTextReadout)
+      mTextReadout->SetTargetAndDrawRECTs(valueBounds);
+    if (mDecButton)
+      mDecButton->SetTargetAndDrawRECTs(decBounds);
+    if (mIncButton)
+      mIncButton->SetTargetAndDrawRECTs(incBounds);
+
+    SetTargetRECT(valueBounds);
+    SetDirty(false);
+  }
+
+  void OnMouseDblClick(float, float, const IMouseMod&) override
+  {
+    if (IsDisabled() || GetParam() == nullptr)
+      return;
+    GetDelegate()->BeginInformHostOfParamChangeFromUI(GetParamIdx());
+    mRealValue = 0.0;
+    OnValueChanged();
+    GetDelegate()->EndInformHostOfParamChangeFromUI(GetParamIdx());
   }
 };
 

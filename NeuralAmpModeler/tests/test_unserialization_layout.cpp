@@ -7,8 +7,10 @@
 #include <string_view>
 
 using dessmetal::state::DetectParameterLayout01;
+using dessmetal::state::DetectParameterLayout02;
 using dessmetal::state::ParameterBytes;
 using dessmetal::state::ParameterLayout01;
+using dessmetal::state::ParameterLayout02;
 
 namespace
 {
@@ -33,14 +35,24 @@ int main()
     "ToneStack",      "Boost",        "BoostOutput",     "IRToggle",      "Boost Model",
     "CalibrateInput", "InputCalibrationLevel", "OutputMode", "Amp Model", "Amp Enabled",
   };
+  constexpr std::array<std::string_view, 21> expected02Names{
+    "Input",          "Gain",         "Threshold",       "Bass",          "Middle",
+    "Treble",         "Output",       "Boost Level",     "Boost Tone",    "NoiseGateActive",
+    "ToneStack",      "Boost",        "BoostOutput",     "IRToggle",      "Boost Model",
+    "CalibrateInput", "InputCalibrationLevel", "OutputMode", "Amp Model", "Amp Enabled",
+    "Transpose",
+  };
 
   ExpectNames(dessmetal::state::kLegacy010ParameterNames, expectedLegacyNames);
   ExpectNames(dessmetal::state::kCurrent01ParameterNames, expectedCurrentNames);
+  ExpectNames(dessmetal::state::kCurrent02ParameterNames, expected02Names);
 
   constexpr auto legacyBytes = ParameterBytes(expectedLegacyNames.size());
   constexpr auto currentBytes = ParameterBytes(expectedCurrentNames.size());
+  constexpr auto current02Bytes = ParameterBytes(expected02Names.size());
   static_assert(legacyBytes == 112);
   static_assert(currentBytes == 160);
+  static_assert(current02Bytes == 168);
 
   // Exact historical 0.1.0 and current 0.1.x payload shapes are accepted.
   assert(DetectParameterLayout01(legacyBytes, true, false) == ParameterLayout01::Legacy010_14);
@@ -84,6 +96,20 @@ int main()
   assert(DetectParameterLayout01(currentBytes + dessmetal::state::kVST3BypassSuffixBytes + 1, true, true)
          == ParameterLayout01::Invalid);
 
+  // 0.2 owns one exact 21-value shape and preserves the wrapper-owned VST3
+  // suffix contract without accepting older or partially extended payloads.
+  assert(DetectParameterLayout02(current02Bytes, false) == ParameterLayout02::Current21);
+  assert(DetectParameterLayout02(current02Bytes, true) == ParameterLayout02::Current21);
+  assert(DetectParameterLayout02(current02Bytes + dessmetal::state::kVST3BypassSuffixBytes, true)
+         == ParameterLayout02::Current21);
+  assert(DetectParameterLayout02(current02Bytes + dessmetal::state::kVST3BypassSuffixBytes, false)
+         == ParameterLayout02::Invalid);
+  assert(DetectParameterLayout02(currentBytes, true) == ParameterLayout02::Invalid);
+  assert(DetectParameterLayout02(current02Bytes - 1, true) == ParameterLayout02::Invalid);
+  assert(DetectParameterLayout02(current02Bytes + 1, true) == ParameterLayout02::Invalid);
+  assert(DetectParameterLayout02(current02Bytes + dessmetal::state::kVST3BypassSuffixBytes + 1, true)
+         == ParameterLayout02::Invalid);
+
   constexpr std::array<dessmetal::state::NamedDefault, 6> expectedDefaults{
     dessmetal::state::NamedDefault{"Boost Level", 0.0},
     dessmetal::state::NamedDefault{"Boost Tone", 5.0},
@@ -105,6 +131,6 @@ int main()
   assert(dessmetal::state::MigrateLegacy010AmpModel(0.0) == 0.0);
   assert(dessmetal::state::MigrateLegacy010AmpModel(1.0) == 2.0);
 
-  std::cout << "DessMetal 0.1 state-layout migration tests passed\n";
+  std::cout << "DessMetal 0.1/0.2 state-layout migration tests passed\n";
   return 0;
 }

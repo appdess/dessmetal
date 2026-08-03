@@ -12,7 +12,7 @@ namespace
 {
 constexpr UInt32 kDessMetalSubtype = '1YEo';
 constexpr UInt32 kDessMetalManufacturer = 'AdMs';
-constexpr std::size_t kCurrentParameterCount = 20;
+constexpr std::size_t kCurrentParameterCount = 21;
 
 template <typename T>
 void AppendNative(std::vector<std::uint8_t>& bytes, const T& value)
@@ -79,7 +79,7 @@ OSStatus ApplyState(AudioUnit unit, const std::string& version, const std::vecto
   CFMutableDictionaryRef dictionary = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
                                                                  &kCFTypeDictionaryKeyCallBacks,
                                                                  &kCFTypeDictionaryValueCallBacks);
-  SetDictionaryNumber(dictionary, kAUPresetVersionKey, 0x000101);
+  SetDictionaryNumber(dictionary, kAUPresetVersionKey, 0x000200);
   SetDictionaryNumber(dictionary, kAUPresetTypeKey, static_cast<SInt32>(kAudioUnitType_Effect));
   SetDictionaryNumber(dictionary, kAUPresetSubtypeKey, static_cast<SInt32>(kDessMetalSubtype));
   SetDictionaryNumber(dictionary, kAUPresetManufacturerKey, static_cast<SInt32>(kDessMetalManufacturer));
@@ -170,7 +170,7 @@ int main()
   };
   const std::array<double, kCurrentParameterCount> expectedLegacy{
     -3.0, 8.0, -45.0, 2.0, 3.0, 4.0, -2.0, 0.0, 5.0, 0.0,
-    1.0, 0.0, 5.0, 0.0, 0.0, 0.0, 10.0, 0.0, 2.0, 1.0,
+    1.0, 0.0, 5.0, 0.0, 0.0, 0.0, 10.0, 0.0, 2.0, 1.0, 0.0,
   };
 
   // Existing 20-value states were also mislabeled 0.1.0 and must remain exact.
@@ -180,7 +180,7 @@ int main()
   };
   const std::array<double, kCurrentParameterCount> expectedCurrent010{
     -1.0, 7.0, -55.0, 6.0, 5.0, 4.0, 1.0, -4.0, 8.0, 1.0,
-    0.0, 1.0, 7.0, 1.0, 3.0, 1.0, 11.0, 0.0, 4.0, 0.0,
+    0.0, 1.0, 7.0, 1.0, 3.0, 1.0, 11.0, 0.0, 4.0, 0.0, 0.0,
   };
 
   // 0.1.1 establishes the unambiguous current layout.
@@ -190,7 +190,16 @@ int main()
   };
   const std::array<double, kCurrentParameterCount> expectedCurrent011{
     2.0, 3.0, -65.0, 4.0, 5.0, 6.0, -3.0, 2.0, 1.0, 0.0,
-    1.0, 0.0, 4.0, 0.0, 2.0, 0.0, 12.0, 0.0, 0.0, 1.0,
+    1.0, 0.0, 4.0, 0.0, 2.0, 0.0, 12.0, 0.0, 0.0, 1.0, 0.0,
+  };
+
+  const std::vector<double> current020{
+    1.0, 6.0, -60.0, 5.0, 4.0, 3.0, -1.0, 1.0, 5.0, 1.0,
+    0.0, 1.0, 6.0, 1.0, 1.0, 0.0, 12.0, 0.0, 4.0, 1.0, -7.0,
+  };
+  const std::array<double, kCurrentParameterCount> expectedCurrent020{
+    1.0, 6.0, -60.0, 5.0, 4.0, 3.0, -1.0, 1.0, 5.0, 1.0,
+    0.0, 1.0, 6.0, 1.0, 1.0, 0.0, 12.0, 0.0, 4.0, 1.0, -7.0,
   };
 
   // Unsupported historical custom slots depended on path-based loading, which
@@ -205,9 +214,11 @@ int main()
                                             "current 20-value 0.1.0")
                       && ExpectAppliedState(unit, "0.1.1", current011, expectedCurrent011,
                                             "current 20-value 0.1.1")
-                      && ExpectRejectedState(unit, "0.1.0", unsupportedLegacyCustom, expectedCurrent011,
+                      && ExpectAppliedState(unit, "0.2.0", current020, expectedCurrent020,
+                                            "current 21-value 0.2.0")
+                      && ExpectRejectedState(unit, "0.1.0", unsupportedLegacyCustom, expectedCurrent020,
                                              "unsupported legacy custom amp")
-                      && ExpectRejectedState(unit, "0.1.0", unsupportedWip18, expectedCurrent011,
+                      && ExpectRejectedState(unit, "0.1.0", unsupportedWip18, expectedCurrent020,
                                              "unsupported 18-value WIP layout");
 
   AudioComponentInstanceDispose(unit);
@@ -215,6 +226,7 @@ int main()
     return 1;
 
   std::cout << "DessMetal AU state migration passed: legacy14, current20@0.1.0, current20@0.1.1, "
+               "current21@0.2.0, "
                "atomic rejection for legacy custom and WIP18\n";
   return 0;
 }
